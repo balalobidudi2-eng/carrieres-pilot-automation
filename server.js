@@ -22,100 +22,125 @@ app.get('/health', (_req, res) => res.json({ ok: true, sessions: sessions.size }
 
 // Résolution automatique Cloudflare Turnstile via 2captcha
 async function autoSolveTurnstile(page) {
-  const apiKey = process.env.TWOCAPTCHA_API_KEY;
-  if (!apiKey) return { solved: false, reason: 'no_api_key' };
   try {
-    // Attendre que le widget Turnstile soit rendu (SPAs Angular/React)
-    await page.waitForTimeout(2000).catch(() => {});
-
-    // Chercher le widget Turnstile sur la page courante — stratégies multiples
-    const sitekey = await page.evaluate(() => {
-      // 1. Attribut data-sitekey direct (div.cf-turnstile ou tout élément)
-      const bySitekey = document.querySelector('[data-sitekey]');
-      if (bySitekey) return bySitekey.getAttribute('data-sitekey');
-
-      // 2. Classe cf-turnstile (widget non encore rendu mais présent dans le DOM)
-      const byClass = document.querySelector('.cf-turnstile, [class*="cf-turnstile"], [id*="cf-chl"]');
-      if (byClass) {
-        const sk = byClass.getAttribute('data-sitekey') || byClass.getAttribute('data-cf-turnstile-sitekey');
-        if (sk) return sk;
-      }
-
-      // 3. iframe Cloudflare Turnstile (challenges.cloudflare.com)
-      const iframes = document.querySelectorAll('iframe');
-      for (const iframe of iframes) {
-        const src = iframe.getAttribute('src') || '';
-        if (src.includes('challenges.cloudflare.com') || src.includes('turnstile') || src.includes('cf-chl')) {
-          // Extraire le sitekey depuis l'URL de l'iframe
-          const m = src.match(/[?&]sitekey=([^&]+)/);
-          if (m) return decodeURIComponent(m[1]);
-          // Parfois le sitekey est dans le param k=
-          const k = src.match(/[?&]k=([^&]+)/);
-          if (k) return decodeURIComponent(k[1]);
-        }
-      }
-
-      // 4. Chercher dans les scripts inline (window.turnstile.render ou data-sitekey dans JSON)
-      const scripts = document.querySelectorAll('script:not([src])');
-      for (const s of scripts) {
-        const m = s.textContent.match(/['"](0x[0-9a-fA-F]{16,})['"]/);
-        if (m) return m[1]; // sitekeys Turnstile commencent souvent par 0x
-      }
-
-      return null;
+    // Stratégie 1 : variables JS globales (page interstitielle Cloudflare)
+    let sitekey = await page.evaluate(() => {
+      return window._cf_chl_opt?.chlApiSitekey
+          || window._cf_chl_opt?.chlApiParams?.sitekey
+          || window.CF_CHLG_SITEKEY
+          || null;
     }).catch(() => null);
-    if (!sitekey) return { solved: false, reason: 'no_turnstile_found' };
 
-    const pageUrl = page.url();
-    console.log('[captcha] Turnstile sitekey:', sitekey, 'url:', pageUrl);
+    // Stratégie 2 : attributs DOM standard
+    if (!sitekey) {
+      sitekey = await page.evaluate(() => {
+        const el = document.querySelector('[data-sitekey]');
+        return el?.dataset?.sitekey || null;
+      }).catch(() => null);
+    }
 
-    // Créer la tâche 2captcha
-    const createRes = await fetch('https://api.2captcha.com/createTask', {
+    // Stratégie 3 : iframe Cloudflare — sitekey dans querystring ou chemin URL
+    if (!sitekey) {
+      for (const frame of page.frames()) {
+        const url = frame.url();
+        const m1 = url.match(/[?&](?:sitekey|k)=(0x[0-9a-fA-F]{16,})/);
+        if (m1) { sitekey = m1[1]; break; }
+        const m2 = url.match(/\/(0x[0-9a-fA-F]{10,})\//);
+        if (m2) { sitekey = m2[1]; break; }
+      }
+    }
+
+    // Stratégie 4 : scan HTML brut (regex large)
+    if (!sitekey) {
+      const html = await page.content().catch(() => '');
+      const patterns = [
+        /chlApiSitekey['":\s]+"(0x[0-9a-fA-F]{16,})"/,
+        /data-sitekey=["'](0x[0-9a-fA-F]{16,})["']/,
+        /'(0x[0-9a-fA-F]{16,})'/,
+        /"(0x[0-9a-fA-F]{16,})"/,
+      ];
+      for (const re of patterns) {
+        const m = html.match(re);
+        if (m) { sitekey = m[1]; break; }
+      }
+    }
+
+    if (!sitekey) {
+      console.log('[CAPTCHA] Sitekey introuvable sur cette page');
+      return false;
+    }
+
+    console.log('[CAPTCHA] Sitekey trouvé :', sitekey);
+
+    // Soumettre à 2captcha
+    const taskRes = await fetch('https://api.2captcha.com/createTask', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        clientKey: apiKey,
-        task: { type: 'TurnstileTaskProxyless', websiteURL: pageUrl, websiteKey: sitekey },
-      }),
+        clientKey: process.env.CAPTCHA_API_KEY,
+        task: {
+          type: 'TurnstileTaskProxyless',
+          websiteURL: page.url(),
+          websiteKey: sitekey,
+        }
+      })
     });
-    const { taskId, errorId, errorCode } = await createRes.json();
-    if (errorId) { console.error('[captcha] Create error:', errorCode); return { solved: false, reason: errorCode }; }
-    console.log('[captcha] Task created:', taskId);
+    const { taskId, errorId } = await taskRes.json();
+    if (errorId || !taskId) {
+      console.log('[CAPTCHA] Erreur création tâche 2captcha');
+      return false;
+    }
 
-    // Attendre la solution (max 2min)
+    // Polling du résultat (max 2 min)
+    let token = null;
     for (let i = 0; i < 24; i++) {
       await new Promise(r => setTimeout(r, 5000));
       const res = await fetch('https://api.2captcha.com/getTaskResult', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ clientKey: apiKey, taskId }),
+        body: JSON.stringify({ clientKey: process.env.CAPTCHA_API_KEY, taskId })
       });
-      const result = await res.json();
-      if (result.status === 'ready') {
-        const token = result.solution.token;
-        // Injecter le token dans la page
-        await page.evaluate((t) => {
-          document.querySelectorAll('[name="cf-turnstile-response"], [name="g-recaptcha-response"]').forEach(el => { el.value = t; });
-          if (typeof window.cfCallback === 'function') window.cfCallback(t);
-          if (typeof window.turnstileCallback === 'function') window.turnstileCallback(t);
-          // Chercher et appeler le callback Turnstile enregistré
-          const iframes = document.querySelectorAll('iframe[src*="turnstile"], iframe[src*="challenges.cloudflare"]');
-          iframes.forEach(iframe => {
-            try {
-              const cfInput = iframe.closest('form')?.querySelector('[name="cf-turnstile-response"]');
-              if (cfInput) cfInput.value = t;
-            } catch {}
-          });
-        }, token);
-        console.log('[captcha] ✅ Turnstile solved');
-        return { solved: true, token };
-      }
-      if (result.errorId) { console.error('[captcha] Poll error:', result.errorCode); return { solved: false, reason: result.errorCode }; }
+      const data = await res.json();
+      if (data.status === 'ready') { token = data.solution?.token; break; }
     }
-    return { solved: false, reason: 'timeout' };
-  } catch (e) {
-    console.error('[captcha] Exception:', e.message);
-    return { solved: false, reason: e.message };
+
+    if (!token) {
+      console.log('[CAPTCHA] Timeout 2captcha');
+      return false;
+    }
+
+    // Injection du token dans la page
+    await page.evaluate((t) => {
+      // Cas 1 : champ caché standard
+      document.querySelectorAll('[name="cf-turnstile-response"]')
+        .forEach(el => { el.value = t; });
+
+      // Cas 2 : page interstitielle CF — callback JS
+      if (window._cf_chl_opt?.chlCB) {
+        window[window._cf_chl_opt.chlCB]?.(t);
+      }
+
+      // Cas 3 : soumettre le formulaire directement
+      const form = document.querySelector('#challenge-form')
+                || document.querySelector('form[action*="challenge"]');
+      if (form) {
+        const hidden = form.querySelector('[name="cf-turnstile-response"]')
+                    || document.createElement('input');
+        hidden.type = 'hidden';
+        hidden.name = 'cf-turnstile-response';
+        hidden.value = t;
+        form.appendChild(hidden);
+        form.submit();
+      }
+    }, token);
+
+    console.log('[CAPTCHA] Token injecté avec succès');
+    await page.waitForNavigation({ timeout: 8000 }).catch(() => {});
+    return true;
+
+  } catch (err) {
+    console.error('[CAPTCHA] Erreur :', err.message);
+    return false;
   }
 }
 
@@ -181,7 +206,7 @@ app.post('/sessions', requireAuth, async (req, res) => {
     const sessionObj = { browser, context, page, createdAt: Date.now() };
     sessions.set(sessionId, sessionObj);
     // Auto-solve Turnstile si 2captcha configuré
-    autoSolveTurnstile(page).then(r => { if (r.solved) console.log('[captcha] Auto-solved on load'); }).catch(() => {});
+    autoSolveTurnstile(page).then(solved => { if (solved) console.log('[captcha] Auto-solved on load'); }).catch(() => {});
     // Suivre les popups (Google OAuth, etc.)
     context.on('page', async (newPage) => {
       try {
@@ -216,10 +241,8 @@ app.post('/sessions/:id/cookies', requireAuth, async (req, res) => {
 app.post('/sessions/:id/solve-captcha', requireAuth, async (req, res) => {
   const session = sessions.get(req.params.id);
   if (!session) return res.status(404).json({ error: 'Session non trouvee' });
-  const result = await autoSolveTurnstile(session.page);
-  if (result.solved) return res.json({ success: true });
-  if (result.reason === 'no_turnstile_found') return res.json({ success: false, reason: 'no_turnstile_found' });
-  res.status(result.reason === 'no_api_key' ? 503 : 500).json({ success: false, reason: result.reason });
+  const solved = await autoSolveTurnstile(session.page);
+  return res.json({ success: !!solved });
 });
 
 app.delete('/sessions/:id', requireAuth, async (req, res) => {
