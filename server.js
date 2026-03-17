@@ -63,16 +63,22 @@ async function autoSolveTurnstile(page) {
       }).catch(() => null);
     }
 
-    // Stratégie 3 : iframe Cloudflare — sitekey dans querystring ou chemin URL
+    // Stratégie 3 : iframe Cloudflare — sitekey + pagedata dans l'URL
+    let iframePagedata = null;
     if (!sitekey) {
       for (const frame of page.frames()) {
         const url = frame.url();
         const m1 = url.match(/[?&](?:sitekey|k)=(0x[A-Za-z0-9]{10,})/);
-        if (m1) { sitekey = m1[1]; break; }
+        if (m1) { sitekey = m1[1]; }
         const m2 = url.match(/\/(0x[A-Za-z0-9]{10,})\//);
-        if (m2) { sitekey = m2[1]; break; }
+        if (m2) { sitekey = m2[1]; }
+        // Extraire pagedata : segment après /light/ ou /dark/ dans l'URL Cloudflare
+        const mp = url.match(/\/(?:light|dark)\/([A-Za-z0-9+/=_-]+)\//);
+        if (mp) { iframePagedata = mp[1]; }
+        if (sitekey) break;
       }
     }
+    if (iframePagedata) console.log('[CAPTCHA] pagedata extrait depuis iframe:', iframePagedata);
 
     // Stratégie 4 : scan HTML brut (regex large)
     if (!sitekey) {
@@ -146,9 +152,9 @@ async function autoSolveTurnstile(page) {
         websiteURL,
         websiteKey: sitekey,
       };
-      if (cfParams.action)    task.action    = cfParams.action;
-      if (cfParams.data)      task.data      = cfParams.data;
-      if (cfParams.pagedata)  task.pagedata  = cfParams.pagedata;
+      if (cfParams.action)                        task.action   = cfParams.action;
+      if (cfParams.data)                          task.data     = cfParams.data;
+      if (cfParams.pagedata || iframePagedata)    task.pagedata = cfParams.pagedata || iframePagedata;
 
       const proxyAddr = process.env.CAPTCHA_PROXY_ADDRESS;
       if (proxyAddr) {
