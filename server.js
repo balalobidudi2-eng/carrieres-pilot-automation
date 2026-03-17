@@ -73,7 +73,7 @@ async function autoSolveTurnstile(page) {
         const m2 = url.match(/\/(0x[A-Za-z0-9]{10,})\//);
         if (m2) { sitekey = m2[1]; }
         // Extraire pagedata : segment après /light/ ou /dark/ dans l'URL Cloudflare
-        const mp = url.match(/\/(?:light|dark)\/([A-Za-z0-9+/=_-]+)\//);
+        const mp = url.match(/\/(?:light|dark)\/([A-Za-z0-9+/=_-]{2,10})\//);
         if (mp) { iframePagedata = mp[1]; }
         if (sitekey) break;
       }
@@ -216,6 +216,9 @@ async function autoSolveTurnstile(page) {
       console.log('[CAPTCHA] Timeout 2captcha');
       return false;
     }
+
+    // Attendre que le widget Turnstile soit rendu avant d'injecter
+    await page.waitForSelector('[name="cf-turnstile-response"], .cf-turnstile, [data-sitekey]', { timeout: 8000 }).catch(() => {});
 
     // Injection du token dans la page
     console.log('[CAPTCHA] Token obtenu, début injection:', token.substring(0, 20) + '...');
