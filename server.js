@@ -67,9 +67,9 @@ async function autoSolveTurnstile(page) {
     if (!sitekey) {
       for (const frame of page.frames()) {
         const url = frame.url();
-        const m1 = url.match(/[?&](?:sitekey|k)=(0x[0-9a-fA-F]{16,})/);
+        const m1 = url.match(/[?&](?:sitekey|k)=(0x[A-Za-z0-9]{10,})/);
         if (m1) { sitekey = m1[1]; break; }
-        const m2 = url.match(/\/(0x[0-9a-fA-F]{10,})\//);
+        const m2 = url.match(/\/(0x[A-Za-z0-9]{10,})\//);
         if (m2) { sitekey = m2[1]; break; }
       }
     }
@@ -78,10 +78,10 @@ async function autoSolveTurnstile(page) {
     if (!sitekey) {
       const html = await page.content().catch(() => '');
       const patterns = [
-        /chlApiSitekey['":\s]+"(0x[0-9a-fA-F]{16,})"/,
-        /data-sitekey=["'](0x[0-9a-fA-F]{16,})["']/,
-        /'(0x[0-9a-fA-F]{16,})'/,
-        /"(0x[0-9a-fA-F]{16,})"/,
+        /chlApiSitekey['":\s]+"(0x[A-Za-z0-9]{10,})"/,
+        /data-sitekey=["'](0x[A-Za-z0-9]{10,})["']/,
+        /'(0x[A-Za-z0-9]{10,})'/,
+        /"(0x[A-Za-z0-9]{10,})"/,
       ];
       for (const re of patterns) {
         const m = html.match(re);
