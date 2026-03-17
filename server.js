@@ -98,6 +98,8 @@ async function autoSolveTurnstile(page) {
     }
 
     console.log('[CAPTCHA] Sitekey trouvé :', sitekey);
+    const cleanUrl = page.url().split('?')[0].split('#')[0];
+    console.log('[CAPTCHA] URL soumise à 2captcha :', cleanUrl);
 
     // Soumettre à 2captcha
     const taskRes = await fetch('https://api.2captcha.com/createTask', {
@@ -107,7 +109,7 @@ async function autoSolveTurnstile(page) {
         clientKey: process.env.CAPTCHA_API_KEY,
         task: {
           type: 'TurnstileTaskProxyless',
-          websiteURL: 'https://secure.indeed.com/auth',
+          websiteURL: cleanUrl,
           websiteKey: sitekey,
         }
       })
