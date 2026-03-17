@@ -11,6 +11,7 @@ const wss = new WebSocketServer({ server });
 if (!process.env.AUTOMATION_SECRET) console.warn('WARNING: AUTOMATION_SECRET non configuree');
 
 const sessions = new Map();
+const userCookies = new Map(); // userId => cookies[] envoyés par l'extension Chrome
 
 function requireAuth(req, res, next) {
   const secret = process.env.AUTOMATION_SECRET;
@@ -328,6 +329,7 @@ app.post('/sessions', requireAuth, async (req, res) => {
     }
 
     const browser = await chromium.launch(launchOptions);
+    const userId = req.body.userId || null;
     const context = await browser.newContext({
       userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36',
       viewport: { width: 1280, height: 720 },
@@ -369,6 +371,12 @@ app.post('/sessions', requireAuth, async (req, res) => {
         navigator.permissions.query = (params) => params.name === 'notifications' ? Promise.resolve({ state: 'default', onchange: null }) : orig(params);
       }
     });
+    // Injecter les cookies Indeed si l'utilisateur en a envoyé via l'extension
+    if (userId && userCookies.has(userId)) {
+      const storedCookies = userCookies.get(userId);
+      await context.addCookies(storedCookies);
+      console.log(`[SESSION] Cookies Indeed injectés pour userId: ${userId} (${storedCookies.length} cookies)`);
+    }
     const page = await context.newPage();
     await page.goto(initialUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
     const sessionObj = { browser, context, page, createdAt: Date.now() };
@@ -396,6 +404,17 @@ app.post('/sessions', requireAuth, async (req, res) => {
     console.error('[sessions] Erreur:', e.message);
     res.status(500).json({ error: e.message });
   }
+});
+
+// Réception des cookies Indeed depuis l'extension Chrome (via Vercel)
+app.post('/sessions/cookies', requireAuth, async (req, res) => {
+  const { userId, cookies } = req.body;
+  if (!userId || !Array.isArray(cookies) || !cookies.length) {
+    return res.status(400).json({ error: 'userId et cookies requis' });
+  }
+  userCookies.set(userId, cookies);
+  console.log(`[cookies] Stockés pour userId: ${userId} (${cookies.length} cookies)`);
+  return res.json({ success: true });
 });
 
 app.post('/sessions/:id/cookies', requireAuth, async (req, res) => {
