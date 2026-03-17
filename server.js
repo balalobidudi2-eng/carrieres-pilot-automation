@@ -101,11 +101,17 @@ async function autoSolveTurnstile(page) {
 
     // Extraire les paramètres CF supplémentaires nécessaires pour que le token soit accepté
     const cfParams = await page.evaluate(() => {
+      // Source 1 : _turnstileParams injecté par le site (le plus fiable)
+      const tp = window._turnstileParams || {};
+
       const opt = window._cf_chl_opt || {};
-      // Chercher aussi dans les iframes CF
-      let action = opt.chlApiParams?.action || opt.chlAction || null;
-      let data   = opt.chlApiParams?.cData  || opt.chlData   || null;
-      let pagedata = opt.chlPageData || null;
+      let action   = tp.action   || opt.chlApiParams?.action || opt.chlAction || null;
+      let data     = tp.data     || opt.chlApiParams?.cData  || opt.chlData   || null;
+      let pagedata = tp.pagedata || opt.chlPageData || null;
+      let userAgent = tp.userAgent || navigator.userAgent || null;
+      // Sitekey depuis _turnstileParams (peut affiner celui trouvé via DOM/iframe)
+      let tpSitekey = tp.sitekey || null;
+
       // Parfois dans l'URL de l'iframe : ?action=managed&cData=xxx
       const cfFrame = Array.from(document.querySelectorAll('iframe')).find(f =>
         f.src && (f.src.includes('challenges.cloudflare.com') || f.src.includes('cdn-cgi/challenge-platform'))
@@ -113,14 +119,16 @@ async function autoSolveTurnstile(page) {
       if (cfFrame) {
         try {
           const u = new URL(cfFrame.src);
-          action = action || u.searchParams.get('action');
-          data   = data   || u.searchParams.get('cData');
+          action   = action   || u.searchParams.get('action');
+          data     = data     || u.searchParams.get('cData');
           pagedata = pagedata || u.searchParams.get('chlPageData');
         } catch {}
       }
-      return { action, data, pagedata };
-    }).catch(() => ({ action: null, data: null, pagedata: null }));
+      return { action, data, pagedata, userAgent, tpSitekey };
+    }).catch(() => ({ action: null, data: null, pagedata: null, userAgent: null, tpSitekey: null }));
 
+    // Priorité au sitekey issu de _turnstileParams s'il est présent
+    if (cfParams.tpSitekey) sitekey = cfParams.tpSitekey;
     console.log('[CAPTCHA] Paramètres CF extraits:', cfParams);
 
     const cleanUrl = page.url().split('?')[0].split('#')[0];
@@ -138,9 +146,10 @@ async function autoSolveTurnstile(page) {
         websiteURL,
         websiteKey: sitekey,
       };
-      if (cfParams.action)   task.action   = cfParams.action;
-      if (cfParams.data)     task.data      = cfParams.data;
-      if (cfParams.pagedata) task.pagedata  = cfParams.pagedata;
+      if (cfParams.action)    task.action    = cfParams.action;
+      if (cfParams.data)      task.data      = cfParams.data;
+      if (cfParams.pagedata)  task.pagedata  = cfParams.pagedata;
+      if (cfParams.userAgent) task.userAgent = cfParams.userAgent;
 
       const proxyAddr = process.env.CAPTCHA_PROXY_ADDRESS;
       if (proxyAddr) {
