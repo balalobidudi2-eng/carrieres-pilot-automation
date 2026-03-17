@@ -23,6 +23,8 @@ app.get('/health', (_req, res) => res.json({ ok: true, sessions: sessions.size }
 // Résolution automatique Cloudflare Turnstile via 2captcha
 async function autoSolveTurnstile(page) {
   try {
+    console.log('[CAPTCHA] autoSolveTurnstile start, page:', page.url());
+
     // Laisser le challenge Cloudflare apparaître avant de chercher le sitekey.
     await page.waitForLoadState('domcontentloaded').catch(() => {});
     for (let i = 0; i < 10; i++) {
@@ -41,6 +43,9 @@ async function autoSolveTurnstile(page) {
       if (hasJsOrDomSitekey || hasCloudflareFrame) break;
       await page.waitForTimeout(1000).catch(() => {});
     }
+
+    console.log('[CAPTCHA] Après attente, page:', page.url());
+    console.log('[CAPTCHA] Frames détectées:', page.frames().map(frame => frame.url()));
 
     // Stratégie 1 : variables JS globales (page interstitielle Cloudflare)
     let sitekey = await page.evaluate(() => {
@@ -85,7 +90,10 @@ async function autoSolveTurnstile(page) {
     }
 
     if (!sitekey) {
+      const htmlPreview = await page.content().then(html => html.slice(0, 2000)).catch(() => '');
       console.log('[CAPTCHA] Sitekey introuvable sur cette page');
+      console.log('[CAPTCHA] URL au moment de l\'échec :', page.url());
+      console.log('[CAPTCHA] Extrait HTML :', htmlPreview);
       return false;
     }
 
@@ -225,6 +233,7 @@ app.post('/sessions', requireAuth, async (req, res) => {
     const sessionObj = { browser, context, page, createdAt: Date.now() };
     sessions.set(sessionId, sessionObj);
     // Auto-solve Turnstile si 2captcha configuré
+    console.log('[captcha] Trigger autoSolveTurnstile on initial page:', page.url());
     autoSolveTurnstile(page).then(solved => { if (solved) console.log('[captcha] Auto-solved on load'); }).catch(() => {});
     // Suivre les popups (Google OAuth, etc.)
     context.on('page', async (newPage) => {
@@ -232,6 +241,8 @@ app.post('/sessions', requireAuth, async (req, res) => {
         await newPage.waitForLoadState('domcontentloaded', { timeout: 10000 }).catch(() => {});
         sessionObj.page = newPage;
         console.log('[sessions] Popup ouverte:', newPage.url());
+        console.log('[captcha] Trigger autoSolveTurnstile on popup page:', newPage.url());
+        autoSolveTurnstile(newPage).then(solved => { if (solved) console.log('[captcha] Auto-solved on popup'); }).catch(() => {});
         newPage.on('close', () => {
           const pages = context.pages();
           if (pages.length > 0) { sessionObj.page = pages[pages.length - 1]; console.log('[sessions] Popup fermee, retour:', sessionObj.page.url()); }
