@@ -98,6 +98,31 @@ async function autoSolveTurnstile(page) {
     }
 
     console.log('[CAPTCHA] Sitekey trouvé :', sitekey);
+
+    // Extraire les paramètres CF supplémentaires nécessaires pour que le token soit accepté
+    const cfParams = await page.evaluate(() => {
+      const opt = window._cf_chl_opt || {};
+      // Chercher aussi dans les iframes CF
+      let action = opt.chlApiParams?.action || opt.chlAction || null;
+      let data   = opt.chlApiParams?.cData  || opt.chlData   || null;
+      let pagedata = opt.chlPageData || null;
+      // Parfois dans l'URL de l'iframe : ?action=managed&cData=xxx
+      const cfFrame = Array.from(document.querySelectorAll('iframe')).find(f =>
+        f.src && (f.src.includes('challenges.cloudflare.com') || f.src.includes('cdn-cgi/challenge-platform'))
+      );
+      if (cfFrame) {
+        try {
+          const u = new URL(cfFrame.src);
+          action = action || u.searchParams.get('action');
+          data   = data   || u.searchParams.get('cData');
+          pagedata = pagedata || u.searchParams.get('chlPageData');
+        } catch {}
+      }
+      return { action, data, pagedata };
+    }).catch(() => ({ action: null, data: null, pagedata: null }));
+
+    console.log('[CAPTCHA] Paramètres CF extraits:', cfParams);
+
     const cleanUrl = page.url().split('?')[0].split('#')[0];
     const rawUrlNoHash = page.url().split('#')[0];
     const candidateUrls = Array.from(new Set([
@@ -107,21 +132,40 @@ async function autoSolveTurnstile(page) {
       'https://fr.indeed.com/account/login',
     ]));
 
+    // Construire la task 2captcha — avec proxy si configuré
+    const buildTask = (websiteURL) => {
+      const task = {
+        websiteURL,
+        websiteKey: sitekey,
+      };
+      if (cfParams.action)   task.action   = cfParams.action;
+      if (cfParams.data)     task.data      = cfParams.data;
+      if (cfParams.pagedata) task.pagedata  = cfParams.pagedata;
+
+      const proxyAddr = process.env.CAPTCHA_PROXY_ADDRESS;
+      if (proxyAddr) {
+        task.type          = 'TurnstileTask';
+        task.proxyType     = process.env.CAPTCHA_PROXY_TYPE     || 'http';
+        task.proxyAddress  = proxyAddr;
+        task.proxyPort     = parseInt(process.env.CAPTCHA_PROXY_PORT || '8080', 10);
+        task.proxyLogin    = process.env.CAPTCHA_PROXY_LOGIN    || undefined;
+        task.proxyPassword = process.env.CAPTCHA_PROXY_PASSWORD || undefined;
+        console.log('[CAPTCHA] Mode proxy activé:', proxyAddr + ':' + task.proxyPort);
+      } else {
+        task.type = 'TurnstileTaskProxyless';
+      }
+      return task;
+    };
+
     // Soumettre à 2captcha (fallback sur plusieurs URL de page)
     let taskId = null;
     for (const websiteURL of candidateUrls) {
-      console.log('[CAPTCHA] URL soumise à 2captcha :', websiteURL);
+      const task = buildTask(websiteURL);
+      console.log('[CAPTCHA] URL soumise à 2captcha :', websiteURL, '| type:', task.type);
       const taskRes = await fetch('https://api.2captcha.com/createTask', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          clientKey: process.env.CAPTCHA_API_KEY,
-          task: {
-            type: 'TurnstileTaskProxyless',
-            websiteURL,
-            websiteKey: sitekey,
-          }
-        })
+        body: JSON.stringify({ clientKey: process.env.CAPTCHA_API_KEY, task })
       });
       const taskData = await taskRes.json();
       if (!taskData.errorId && taskData.taskId) {
