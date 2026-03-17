@@ -23,6 +23,25 @@ app.get('/health', (_req, res) => res.json({ ok: true, sessions: sessions.size }
 // Résolution automatique Cloudflare Turnstile via 2captcha
 async function autoSolveTurnstile(page) {
   try {
+    // Laisser le challenge Cloudflare apparaître avant de chercher le sitekey.
+    await page.waitForLoadState('domcontentloaded').catch(() => {});
+    for (let i = 0; i < 10; i++) {
+      const hasJsOrDomSitekey = await page.evaluate(() => {
+        return !!(
+          window._cf_chl_opt?.chlApiSitekey
+          || window._cf_chl_opt?.chlApiParams?.sitekey
+          || window.CF_CHLG_SITEKEY
+          || document.querySelector('[data-sitekey]')
+        );
+      }).catch(() => false);
+      const hasCloudflareFrame = page.frames().some(frame => {
+        const url = frame.url();
+        return url.includes('challenges.cloudflare.com') || url.includes('/cdn-cgi/challenge-platform/');
+      });
+      if (hasJsOrDomSitekey || hasCloudflareFrame) break;
+      await page.waitForTimeout(1000).catch(() => {});
+    }
+
     // Stratégie 1 : variables JS globales (page interstitielle Cloudflare)
     let sitekey = await page.evaluate(() => {
       return window._cf_chl_opt?.chlApiSitekey
