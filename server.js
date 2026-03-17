@@ -99,24 +99,45 @@ async function autoSolveTurnstile(page) {
 
     console.log('[CAPTCHA] Sitekey trouvé :', sitekey);
     const cleanUrl = page.url().split('?')[0].split('#')[0];
-    console.log('[CAPTCHA] URL soumise à 2captcha :', cleanUrl);
+    const rawUrlNoHash = page.url().split('#')[0];
+    const candidateUrls = Array.from(new Set([
+      cleanUrl,
+      rawUrlNoHash,
+      'https://secure.indeed.com/auth',
+      'https://fr.indeed.com/account/login',
+    ]));
 
-    // Soumettre à 2captcha
-    const taskRes = await fetch('https://api.2captcha.com/createTask', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        clientKey: process.env.CAPTCHA_API_KEY,
-        task: {
-          type: 'TurnstileTaskProxyless',
-          websiteURL: cleanUrl,
-          websiteKey: sitekey,
-        }
-      })
-    });
-    const { taskId, errorId } = await taskRes.json();
-    if (errorId || !taskId) {
-      console.log('[CAPTCHA] Erreur création tâche 2captcha');
+    // Soumettre à 2captcha (fallback sur plusieurs URL de page)
+    let taskId = null;
+    for (const websiteURL of candidateUrls) {
+      console.log('[CAPTCHA] URL soumise à 2captcha :', websiteURL);
+      const taskRes = await fetch('https://api.2captcha.com/createTask', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          clientKey: process.env.CAPTCHA_API_KEY,
+          task: {
+            type: 'TurnstileTaskProxyless',
+            websiteURL,
+            websiteKey: sitekey,
+          }
+        })
+      });
+      const taskData = await taskRes.json();
+      if (!taskData.errorId && taskData.taskId) {
+        taskId = taskData.taskId;
+        break;
+      }
+      console.log('[CAPTCHA] Erreur création tâche 2captcha :', {
+        errorId: taskData.errorId,
+        errorCode: taskData.errorCode,
+        errorDescription: taskData.errorDescription,
+        websiteURL,
+        sitekey,
+      });
+    }
+
+    if (!taskId) {
       return false;
     }
 
