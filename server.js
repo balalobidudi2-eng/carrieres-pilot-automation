@@ -160,17 +160,41 @@ async function autoSolveTurnstile(page) {
     }
 
     // Injection du token dans la page
-    await page.evaluate((t) => {
-      // Cas 1 : champ caché standard
-      document.querySelectorAll('[name="cf-turnstile-response"]')
-        .forEach(el => { el.value = t; });
+    console.log('[CAPTCHA] Token obtenu, début injection:', token.substring(0, 20) + '...');
+    const injected = await page.evaluate((t) => {
+      const result = { method: null, widgetFound: false, callbackName: null, inputsFound: 0 };
 
-      // Cas 2 : page interstitielle CF — callback JS
-      if (window._cf_chl_opt?.chlCB) {
-        window[window._cf_chl_opt.chlCB]?.(t);
+      // Cas 1 : widget Turnstile embarqué — appeler data-callback directement
+      const widget = document.querySelector('.cf-turnstile, [data-sitekey]');
+      result.widgetFound = !!widget;
+      if (widget?.dataset?.callback) {
+        result.callbackName = widget.dataset.callback;
+        const fn = window[widget.dataset.callback];
+        if (typeof fn === 'function') {
+          fn(t);
+          result.method = 'widget-callback';
+          return result;
+        }
       }
 
-      // Cas 3 : soumettre le formulaire directement
+      // Cas 2 : champ caché standard + dispatch events
+      const inputs = document.querySelectorAll('[name="cf-turnstile-response"]');
+      result.inputsFound = inputs.length;
+      inputs.forEach(el => {
+        el.value = t;
+        el.dispatchEvent(new Event('input', { bubbles: true }));
+        el.dispatchEvent(new Event('change', { bubbles: true }));
+      });
+      if (inputs.length) result.method = 'hidden-input';
+
+      // Cas 3 : page interstitielle CF — callback JS
+      if (window._cf_chl_opt?.chlCB) {
+        window[window._cf_chl_opt.chlCB]?.(t);
+        result.method = 'cf-interstitial';
+        return result;
+      }
+
+      // Cas 4 : soumettre le formulaire directement
       const form = document.querySelector('#challenge-form')
                 || document.querySelector('form[action*="challenge"]');
       if (form) {
@@ -179,13 +203,28 @@ async function autoSolveTurnstile(page) {
         hidden.type = 'hidden';
         hidden.name = 'cf-turnstile-response';
         hidden.value = t;
-        form.appendChild(hidden);
+        if (!hidden.parentNode) form.appendChild(hidden);
         form.submit();
+        result.method = 'form-submit';
       }
+
+      return result;
     }, token);
 
-    console.log('[CAPTCHA] Token injecté avec succès');
-    await page.waitForNavigation({ timeout: 8000 }).catch(() => {});
+    console.log('[CAPTCHA] Résultat injection:', JSON.stringify(injected));
+    if (!injected.method) {
+      console.log('[CAPTCHA] ATTENTION: Aucune stratégie d\'injection n\'a fonctionné (widget:', injected.widgetFound, ', inputs:', injected.inputsFound, ', callback:', injected.callbackName, ')');
+      return false;
+    }
+
+    // Attendre que la page réagisse (navigation ou changement d'URL)
+    const urlBefore = page.url();
+    await Promise.race([
+      page.waitForNavigation({ timeout: 10000 }),
+      page.waitForURL(url => url !== urlBefore, { timeout: 10000 }),
+    ]).catch(() => {});
+
+    console.log('[CAPTCHA] Après injection, URL:', page.url());
     return true;
 
   } catch (err) {
