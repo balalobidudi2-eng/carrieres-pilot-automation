@@ -291,7 +291,12 @@ app.post('/sessions', requireAuth, async (req, res) => {
   if (sessions.has(sessionId)) return res.status(409).json({ error: 'Session deja existante' });
   try {
     const { chromium } = require('playwright');
-    const browser = await chromium.launch({
+    const proxyAddress = process.env.CAPTCHA_PROXY_ADDRESS;
+    const proxyPort = process.env.CAPTCHA_PROXY_PORT;
+    const proxyLogin = process.env.CAPTCHA_PROXY_LOGIN;
+    const proxyPassword = process.env.CAPTCHA_PROXY_PASSWORD;
+
+    const launchOptions = {
       headless: true,
       args: [
         '--no-sandbox', '--disable-setuid-sandbox',
@@ -300,7 +305,20 @@ app.post('/sessions', requireAuth, async (req, res) => {
         '--disable-infobars', '--no-first-run', '--no-default-browser-check',
         '--lang=fr-FR,fr', '--disable-ipc-flooding-protection',
       ],
-    });
+    };
+
+    if (proxyAddress && proxyPort) {
+      launchOptions.proxy = {
+        server: `http://${proxyAddress}:${proxyPort}`,
+        username: proxyLogin,
+        password: proxyPassword,
+      };
+      console.log(`[PROXY] Mode proxy activé: ${proxyAddress}:${proxyPort}`);
+    } else {
+      console.log('[PROXY] Aucun proxy configuré');
+    }
+
+    const browser = await chromium.launch(launchOptions);
     const context = await browser.newContext({
       userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36',
       viewport: { width: 1280, height: 720 },
