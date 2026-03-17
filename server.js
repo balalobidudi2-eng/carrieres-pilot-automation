@@ -282,7 +282,10 @@ app.post('/sessions', requireAuth, async (req, res) => {
 
 app.post('/sessions/:id/cookies', requireAuth, async (req, res) => {
   const session = sessions.get(req.params.id);
-  if (!session) return res.status(404).json({ error: 'Session non trouvee' });
+  if (!session) {
+    console.log('[sessions] Not found for /cookies:', req.params.id, 'known:', Array.from(sessions.keys()));
+    return res.status(404).json({ error: 'Session non trouvee' });
+  }
   try {
     const currentUrl = session.page.url();
     const cookies = await session.context.cookies();
@@ -293,14 +296,20 @@ app.post('/sessions/:id/cookies', requireAuth, async (req, res) => {
 // Endpoint pour résoudre manuellement un CAPTCHA Turnstile sur la session active
 app.post('/sessions/:id/solve-captcha', requireAuth, async (req, res) => {
   const session = sessions.get(req.params.id);
-  if (!session) return res.status(404).json({ error: 'Session non trouvee' });
+  if (!session) {
+    console.log('[sessions] Not found for /solve-captcha:', req.params.id, 'known:', Array.from(sessions.keys()));
+    return res.status(404).json({ error: 'Session non trouvee' });
+  }
   const solved = await autoSolveTurnstile(session.page);
   return res.json({ success: !!solved });
 });
 
 app.delete('/sessions/:id', requireAuth, async (req, res) => {
   const session = sessions.get(req.params.id);
-  if (!session) return res.json({ success: true });
+  if (!session) {
+    console.log('[sessions] Not found for DELETE:', req.params.id, 'known:', Array.from(sessions.keys()));
+    return res.json({ success: true });
+  }
   try {
     await session.browser.close();
     sessions.delete(req.params.id);
@@ -321,7 +330,11 @@ wss.on('connection', (ws, req) => {
   const secret = url.searchParams.get('secret');
   if (!process.env.AUTOMATION_SECRET || secret !== process.env.AUTOMATION_SECRET) { ws.close(1008, 'Non autorise'); return; }
   const session = sessions.get(sessionId);
-  if (!session) { ws.close(1008, 'Session non trouvee'); return; }
+  if (!session) {
+    console.log('[sessions] Not found for websocket:', sessionId, 'known:', Array.from(sessions.keys()));
+    ws.close(1008, 'Session non trouvee');
+    return;
+  }
   const interval = setInterval(async () => {
     if (ws.readyState !== ws.OPEN) { clearInterval(interval); return; }
     try { const shot = await session.page.screenshot({ type: 'jpeg', quality: 65 }); ws.send(shot); }
