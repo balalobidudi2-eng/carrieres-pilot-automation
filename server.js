@@ -149,7 +149,6 @@ async function autoSolveTurnstile(page) {
       if (cfParams.action)    task.action    = cfParams.action;
       if (cfParams.data)      task.data      = cfParams.data;
       if (cfParams.pagedata)  task.pagedata  = cfParams.pagedata;
-      if (cfParams.userAgent) task.userAgent = cfParams.userAgent;
 
       const proxyAddr = process.env.CAPTCHA_PROXY_ADDRESS;
       if (proxyAddr) {
