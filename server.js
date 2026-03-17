@@ -107,7 +107,7 @@ async function autoSolveTurnstile(page) {
         clientKey: process.env.CAPTCHA_API_KEY,
         task: {
           type: 'TurnstileTaskProxyless',
-          websiteURL: page.url(),
+          websiteURL: 'https://secure.indeed.com/auth',
           websiteKey: sitekey,
         }
       })
