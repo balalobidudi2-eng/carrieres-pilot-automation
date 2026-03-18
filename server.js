@@ -2,6 +2,7 @@
 const express = require('express');
 const { WebSocketServer } = require('ws');
 const http = require('http');
+const APP_VERSION = 'v2-store-cookies-pg';
 
 const app = express();
 app.use(express.json());
@@ -25,7 +26,7 @@ function requireAuth(req, res, next) {
   next();
 }
 
-app.get('/health', (_req, res) => res.json({ ok: true, sessions: sessions.size }));
+app.get('/health', (_req, res) => res.json({ ok: true, sessions: sessions.size, version: APP_VERSION }));
 
 // Résolution automatique Cloudflare Turnstile via 2captcha
 async function autoSolveTurnstile(page) {
@@ -527,5 +528,5 @@ wss.on('connection', (ws, req) => {
 });
 
 const PORT = parseInt(process.env.PORT || '3001', 10);
-server.listen(PORT, '0.0.0.0', () => console.log('[startup] Listening on 0.0.0.0:' + PORT));
+server.listen(PORT, '0.0.0.0', () => console.log(`[startup] version=${APP_VERSION} Listening on 0.0.0.0:` + PORT));
 server.on('error', (e) => { console.error('[startup] ERROR:', e.message); process.exit(1); });
