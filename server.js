@@ -407,7 +407,7 @@ app.post('/sessions', requireAuth, async (req, res) => {
 });
 
 // Réception des cookies Indeed depuis l'extension Chrome (via Vercel)
-app.post('/sessions/cookies', requireAuth, async (req, res) => {
+app.post('/store-cookies', requireAuth, async (req, res) => {
   const { userId, cookies } = req.body;
   if (!userId || !Array.isArray(cookies) || !cookies.length) {
     return res.status(400).json({ error: 'userId et cookies requis' });
