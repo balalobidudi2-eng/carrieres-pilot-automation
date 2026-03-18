@@ -406,8 +406,17 @@ app.post('/sessions', requireAuth, async (req, res) => {
   }
 });
 
-// Réception des cookies Indeed depuis l'extension Chrome (via Vercel)
+// CORS preflight pour l'extension Firefox
+app.options('/store-cookies', (req, res) => {
+  res.set('Access-Control-Allow-Origin', '*');
+  res.set('Access-Control-Allow-Methods', 'POST, OPTIONS');
+  res.set('Access-Control-Allow-Headers', 'Content-Type, x-automation-secret');
+  res.sendStatus(204);
+});
+
+// Réception des cookies Indeed depuis l'extension Firefox
 app.post('/store-cookies', requireAuth, async (req, res) => {
+  res.set('Access-Control-Allow-Origin', '*');
   const { userId, cookies } = req.body;
   if (!userId || !Array.isArray(cookies) || !cookies.length) {
     return res.status(400).json({ error: 'userId et cookies requis' });
