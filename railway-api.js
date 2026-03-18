@@ -21,14 +21,35 @@ function gql(query) {
   });
 }
 
+const NEW_SERVICE_ID = '9332df85-c4d7-42cd-bbb8-95ade0e6efc9';
+const NEW_DOMAIN = 'automation-v2-production.up.railway.app';
+
 async function main() {
-  // Get build logs of latest failed deployment
-  const logs = await gql(`{
-    buildLogs(deploymentId: "${LATEST_FAILED_DEP}", limit: 100) {
-      message severity timestamp
+  // Get latest deployment ID for new service
+  const deps = await gql(`
+    query {
+      deployments(input: { serviceId: "${NEW_SERVICE_ID}", environmentId: "${ENV_ID}" }) {
+        edges { node { id status createdAt } }
+      }
     }
-  }`);
-  console.log('BUILD LOGS:', JSON.stringify(logs, null, 2));
+  `);
+  const edges = deps.data?.deployments?.edges || [];
+  edges.slice(0,3).forEach(e => console.log('Deployment:', e.node.id, e.node.status, e.node.createdAt));
+  const latestDep = edges[0]?.node;
+  if (!latestDep) { console.log('No deployments found'); return; }
+
+  // Get build logs
+  const buildLogs = await gql(`
+    query {
+      buildLogs(deploymentId: "${latestDep.id}") {
+        message timestamp
+      }
+    }
+  `);
+  if (buildLogs.errors) { console.log('BUILD LOG ERRORS:', JSON.stringify(buildLogs.errors)); }
+  const blines = buildLogs.data?.buildLogs || [];
+  console.log('\nBUILD LOGS (last 40):');
+  blines.slice(-40).forEach(l => console.log(l.message));
 }
 
 main().catch(console.error);

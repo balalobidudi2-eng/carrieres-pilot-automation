@@ -11,7 +11,13 @@ const wss = new WebSocketServer({ server });
 if (!process.env.AUTOMATION_SECRET) console.warn('WARNING: AUTOMATION_SECRET non configuree');
 
 const sessions = new Map();
-const userCookies = new Map(); // userId => cookies[] envoyés par l'extension Chrome
+
+// Persistance des cookies Indeed via Neon/PostgreSQL
+const { Pool } = require('pg');
+const dbPool = process.env.DATABASE_URL
+  ? new Pool({ connectionString: process.env.DATABASE_URL, ssl: { rejectUnauthorized: false } })
+  : null;
+if (!dbPool) console.warn('[DB] DATABASE_URL non configuré — cookies non persistés');
 
 function requireAuth(req, res, next) {
   const secret = process.env.AUTOMATION_SECRET;
@@ -74,7 +80,7 @@ async function autoSolveTurnstile(page) {
         const m2 = url.match(/\/(0x[A-Za-z0-9]{10,})\//);
         if (m2) { sitekey = m2[1]; }
         // Extraire pagedata : segment après /light/ ou /dark/ dans l'URL Cloudflare
-        const mp = url.match(/\/(?:light|dark)\/([A-Za-z0-9+/=_-]{2,10})\//);
+        const mp = url.match(/\/(?:light|dark)\/([A-Za-z0-9+=_-]{2,10})\//);  // sans / dans la classe
         if (mp) { iframePagedata = mp[1]; }
         if (sitekey) break;
       }
@@ -296,9 +302,28 @@ async function autoSolveTurnstile(page) {
 }
 
 app.post('/sessions', requireAuth, async (req, res) => {
-  const { sessionId, initialUrl } = req.body;
+  const { sessionId, initialUrl, userId } = req.body;
   if (!sessionId || !initialUrl) return res.status(400).json({ error: 'sessionId et initialUrl requis' });
   if (sessions.has(sessionId)) return res.status(409).json({ error: 'Session deja existante' });
+
+  // Problème 5 : vérifier que des cookies Indeed sont disponibles pour cet utilisateur
+  let storedCookies = null;
+  if (userId && dbPool) {
+    try {
+      const row = await dbPool.query('SELECT cookies FROM indeed_cookies WHERE user_id = $1', [userId]);
+      if (row.rows.length && row.rows[0].cookies) {
+        storedCookies = Array.isArray(row.rows[0].cookies)
+          ? row.rows[0].cookies
+          : JSON.parse(row.rows[0].cookies);
+      }
+    } catch (e) {
+      console.warn('[SESSION] Erreur lecture cookies DB:', e.message);
+    }
+  }
+  if (!storedCookies || !storedCookies.length) {
+    return res.status(400).json({ error: 'Cookies Indeed non disponibles. Utilisez l\'extension pour les envoyer d\'abord.' });
+  }
+
   try {
     const { chromium } = require('playwright');
     const proxyAddress = process.env.CAPTCHA_PROXY_ADDRESS;
@@ -329,7 +354,6 @@ app.post('/sessions', requireAuth, async (req, res) => {
     }
 
     const browser = await chromium.launch(launchOptions);
-    const userId = req.body.userId || null;
     const context = await browser.newContext({
       userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36',
       viewport: { width: 1280, height: 720 },
@@ -371,12 +395,9 @@ app.post('/sessions', requireAuth, async (req, res) => {
         navigator.permissions.query = (params) => params.name === 'notifications' ? Promise.resolve({ state: 'default', onchange: null }) : orig(params);
       }
     });
-    // Injecter les cookies Indeed si l'utilisateur en a envoyé via l'extension
-    if (userId && userCookies.has(userId)) {
-      const storedCookies = userCookies.get(userId);
-      await context.addCookies(storedCookies);
-      console.log(`[SESSION] Cookies Indeed injectés pour userId: ${userId} (${storedCookies.length} cookies)`);
-    }
+    // Problème 2 : injecter les cookies AVANT toute navigation
+    await context.addCookies(storedCookies);
+    console.log(`[SESSION] Cookies injectés: ${storedCookies.length}`);
     const page = await context.newPage();
     await page.goto(initialUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
     const sessionObj = { browser, context, page, createdAt: Date.now() };
@@ -421,7 +442,14 @@ app.post('/store-cookies', requireAuth, async (req, res) => {
   if (!userId || !Array.isArray(cookies) || !cookies.length) {
     return res.status(400).json({ error: 'userId et cookies requis' });
   }
-  userCookies.set(userId, cookies);
+  if (dbPool) {
+    await dbPool.query(
+      `INSERT INTO indeed_cookies (user_id, cookies, updated_at)
+       VALUES ($1, $2, NOW())
+       ON CONFLICT (user_id) DO UPDATE SET cookies = $2, updated_at = NOW()`,
+      [userId, JSON.stringify(cookies)]
+    );
+  }
   console.log(`[cookies] Stockés pour userId: ${userId} (${cookies.length} cookies)`);
   return res.json({ success: true });
 });
