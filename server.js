@@ -444,14 +444,21 @@ app.post('/store-cookies', requireAuth, async (req, res) => {
     return res.status(400).json({ error: 'userId et cookies requis' });
   }
   if (dbPool) {
-    await dbPool.query(
-      `INSERT INTO indeed_cookies (user_id, cookies, updated_at)
-       VALUES ($1, $2, NOW())
-       ON CONFLICT (user_id) DO UPDATE SET cookies = $2, updated_at = NOW()`,
-      [userId, JSON.stringify(cookies)]
-    );
+    try {
+      await dbPool.query(
+        `INSERT INTO indeed_cookies (user_id, cookies, updated_at)
+         VALUES ($1, $2, NOW())
+         ON CONFLICT (user_id) DO UPDATE SET cookies = $2, updated_at = NOW()`,
+        [userId, JSON.stringify(cookies)]
+      );
+      console.log(`[cookies] Stockés en DB pour userId: ${userId} (${cookies.length} cookies)`);
+    } catch (dbErr) {
+      console.error('[cookies] DB error:', dbErr.message);
+      return res.status(500).json({ error: 'Erreur DB: ' + dbErr.message });
+    }
+  } else {
+    console.warn('[cookies] dbPool non disponible — cookies non persistés');
   }
-  console.log(`[cookies] Stockés pour userId: ${userId} (${cookies.length} cookies)`);
   return res.json({ success: true });
 });
 
