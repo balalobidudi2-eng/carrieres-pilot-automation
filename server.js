@@ -305,6 +305,14 @@ async function navigateWithRedirects(page, url) {
 async function applyAdzuna(page) {
   console.log('[APPLY] Adzuna — URL:', page.url());
 
+  // Détecter le blocage bot (page "Accès refusé")
+  const title = await page.title().catch(() => '');
+  const isBlocked = title.toLowerCase().includes('refus') || title.toLowerCase().includes('denied') || title.toLowerCase().includes('blocked');
+  if (isBlocked) {
+    console.warn(`[APPLY] Adzuna — page bloquée par bot detection (titre: "${title}"). L'IP native Railway sera utilisée — vérifier la configuration proxy.`);
+    return { success: false, platform: 'adzuna', error: `Bot detection Adzuna: "${title}". Utiliser un proxy résidentiel ou passer l'URL MeteoJob directement.` };
+  }
+
   // Logger le titre et les liens visibles pour debug
   try {
     const title = await page.title();
@@ -710,12 +718,17 @@ app.post('/sessions', requireAuth, async (req, res) => {
     };
 
     if (proxyAddress && proxyPort) {
-      launchOptions.proxy = {
-        server: `http://${proxyAddress}:${proxyPort}`,
-        username: proxyLogin,
-        password: proxyPassword,
-      };
-      console.log(`[PROXY] Mode proxy activé: ${proxyAddress}:${proxyPort}`);
+      // Pour Adzuna : ne pas utiliser le proxy (leur bot detection bloque les IPs de proxy datacenter)
+      if (initialPlatform !== 'adzuna') {
+        launchOptions.proxy = {
+          server: `http://${proxyAddress}:${proxyPort}`,
+          username: proxyLogin,
+          password: proxyPassword,
+        };
+        console.log(`[PROXY] Mode proxy activé: ${proxyAddress}:${proxyPort}`);
+      } else {
+        console.log(`[PROXY] Proxy désactivé pour adzuna (détection bot sur IPs proxy)`);
+      }
     } else {
       console.log('[PROXY] Aucun proxy configuré');
     }
