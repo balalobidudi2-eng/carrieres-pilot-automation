@@ -199,11 +199,18 @@ async function applyMeteoJob(page) {
     }
   } catch {}
 
-  // Log page title and visible links for debugging
+  // Log page title and try to detect job offer links for debugging
   try {
     const title = await page.title();
-    const links = await page.$$eval('a[href]', els => els.slice(0, 10).map(e => ({ text: e.textContent?.trim().slice(0, 40), href: e.href?.slice(0, 60) })));
-    console.log(`[APPLY] MeteoJob — titre: "${title}", liens: ${JSON.stringify(links)}`);
+    // First look for any offer-related links to find real job URLs
+    const offerLinks = await page.$$eval('a[href]', els =>
+      els.map(e => e.href).filter(h => h && (
+        h.includes('/offre') || h.includes('/jobs/') || h.includes('postuler') || h.includes('apply')
+      )).slice(0, 10)
+    );
+    // Fallback: first 10 links
+    const allLinks = await page.$$eval('a[href]', els => els.slice(0, 10).map(e => ({ text: e.textContent?.trim().slice(0, 40), href: e.href?.slice(0, 80) })));
+    console.log(`[APPLY] MeteoJob — titre: "${title}", offresLinks: ${JSON.stringify(offerLinks)}, liens: ${JSON.stringify(allLinks)}`);
   } catch {}
   return { success: false, platform: 'meteojob', error: 'Bouton postuler non trouvé' };
 }
