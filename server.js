@@ -201,16 +201,14 @@ async function applyMeteoJob(page) {
 
   // Log page title and try to detect job offer links for debugging
   try {
+    // Wait extra time for JS-rendered content (job cards load async on MeteoJob)
+    await page.waitForTimeout(8000);
     const title = await page.title();
-    // First look for any offer-related links to find real job URLs
-    const offerLinks = await page.$$eval('a[href]', els =>
-      els.map(e => e.href).filter(h => h && (
-        h.includes('/offre') || h.includes('/jobs/') || h.includes('postuler') || h.includes('apply')
-      )).slice(0, 10)
-    );
-    // Fallback: first 10 links
-    const allLinks = await page.$$eval('a[href]', els => els.slice(0, 10).map(e => ({ text: e.textContent?.trim().slice(0, 40), href: e.href?.slice(0, 80) })));
-    console.log(`[APPLY] MeteoJob — titre: "${title}", offresLinks: ${JSON.stringify(offerLinks)}, liens: ${JSON.stringify(allLinks)}`);
+    // Collect ALL links and filter for offer-related ones
+    const allHrefs = await page.$$eval('a[href]', els => els.map(e => e.href).filter(h => h && h.startsWith('http')));
+    const offerLinks = allHrefs.filter(h => h.includes('/offre') || h.includes('/jobs/') || h.includes('postuler') || h.includes('apply'));
+    const firstFew = allHrefs.slice(0, 5);
+    console.log(`[APPLY] MeteoJob — titre: "${title}", offresLinks(${offerLinks.length}): ${JSON.stringify(offerLinks.slice(0,5))}, allLinks(${allHrefs.length}): ${JSON.stringify(firstFew)}`);
   } catch {}
   return { success: false, platform: 'meteojob', error: 'Bouton postuler non trouvé' };
 }
