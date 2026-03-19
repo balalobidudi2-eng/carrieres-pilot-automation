@@ -2,7 +2,7 @@
 const express = require('express');
 const { WebSocketServer } = require('ws');
 const http = require('http');
-const APP_VERSION = 'v3.4-adzuna-proxy';
+const APP_VERSION = 'v3.5-adzuna-undici';
 
 const app = express();
 app.use(express.json());
@@ -288,19 +288,40 @@ async function applyGeneric(page) {
 // ─── Pré-résolution URL Adzuna via HTTP simple (bypass bot detection Playwright) ──
 async function preResolveAdzunaUrl(url) {
   if (!url.includes('adzuna.fr') && !url.includes('adzuna.com')) return url;
-  console.log(`[URL] Résolution Adzuna via HTTP: ${url.slice(0, 100)}`);
+
+  const proxyAddress = process.env.CAPTCHA_PROXY_ADDRESS;
+  const proxyPort    = process.env.CAPTCHA_PROXY_PORT;
+  const proxyLogin   = process.env.CAPTCHA_PROXY_LOGIN;
+  const proxyPwd     = process.env.CAPTCHA_PROXY_PASSWORD;
+
+  const reqHeaders = {
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36',
+    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+    'Accept-Language': 'fr-FR,fr;q=0.9,en-US;q=0.8',
+    'Cache-Control': 'no-cache',
+  };
+
+  let fetchFn = fetch;
+  let fetchOpts = { method: 'GET', redirect: 'follow', signal: AbortSignal.timeout(14000), headers: reqHeaders };
+
+  // Essayer via proxy résidentiel en premier (undici ProxyAgent)
+  if (proxyAddress && proxyPort && proxyLogin && proxyPwd) {
+    try {
+      const { fetch: undiciFetch, ProxyAgent } = require('node:undici');
+      const dispatcher = new ProxyAgent(`http://${proxyLogin}:${proxyPwd}@${proxyAddress}:${proxyPort}`);
+      fetchFn  = undiciFetch;
+      fetchOpts = { ...fetchOpts, dispatcher };
+      console.log(`[URL] Résolution Adzuna via HTTP+proxy: ${url.slice(0, 100)}`);
+    } catch (e) {
+      console.warn(`[URL] undici ProxyAgent indispo: ${e.message} — fetch direct`);
+      console.log(`[URL] Résolution Adzuna via HTTP: ${url.slice(0, 100)}`);
+    }
+  } else {
+    console.log(`[URL] Résolution Adzuna via HTTP: ${url.slice(0, 100)}`);
+  }
+
   try {
-    const resp = await fetch(url, {
-      method: 'GET',
-      redirect: 'follow',
-      signal: AbortSignal.timeout(12000),
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36',
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-        'Accept-Language': 'fr-FR,fr;q=0.9,en-US;q=0.8',
-        'Cache-Control': 'no-cache',
-      },
-    });
+    const resp = await fetchFn(url, fetchOpts);
     // Cas 1 : HTTP redirect automatique vers domaine non-Adzuna
     const finalUrl = resp.url;
     if (!finalUrl.includes('adzuna')) {
