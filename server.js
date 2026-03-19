@@ -2,7 +2,7 @@
 const express = require('express');
 const { WebSocketServer } = require('ws');
 const http = require('http');
-const APP_VERSION = 'v3.6-adzuna-undici-fix';
+const APP_VERSION = 'v3.7-adzuna-redirect-manual';
 
 const app = express();
 app.use(express.json());
@@ -301,79 +301,126 @@ async function preResolveAdzunaUrl(url) {
     'Cache-Control': 'no-cache',
   };
 
-  let fetchFn = fetch;
-  let fetchOpts = { method: 'GET', redirect: 'follow', signal: AbortSignal.timeout(14000), headers: reqHeaders };
-
-  // Essayer via proxy résidentiel en premier (undici ProxyAgent)
+  // Stratégie 1 : redirect manual via proxy — intercepter le 302 Location
   if (proxyAddress && proxyPort && proxyLogin && proxyPwd) {
     try {
       const { fetch: undiciFetch, ProxyAgent } = require('undici');
       const dispatcher = new ProxyAgent(`http://${proxyLogin}:${proxyPwd}@${proxyAddress}:${proxyPort}`);
-      fetchFn  = undiciFetch;
-      fetchOpts = { ...fetchOpts, dispatcher };
-      console.log(`[URL] Résolution Adzuna via HTTP+proxy: ${url.slice(0, 100)}`);
+      console.log(`[URL] Strat1: redirect=manual via proxy pour ${url.slice(0, 80)}`);
+      const resp = await undiciFetch(url, {
+        method: 'GET', redirect: 'manual', signal: AbortSignal.timeout(14000),
+        headers: reqHeaders, dispatcher,
+      });
+      console.log(`[URL] Strat1: status=${resp.status}, location=${resp.headers.get('location')?.slice(0, 120)}`);
+      if ([301, 302, 303, 307, 308].includes(resp.status)) {
+        const loc = resp.headers.get('location');
+        if (loc && !loc.includes('adzuna')) {
+          console.log(`[URL] Adzuna résolu via redirect 302: ${loc.slice(0, 120)}`);
+          return loc;
+        }
+        // Si redirigé vers une autre page Adzuna, suivre une fois de plus
+        if (loc) {
+          console.log(`[URL] Strat1: redirect interne Adzuna, suivons: ${loc.slice(0, 100)}`);
+          const resp2 = await undiciFetch(loc, {
+            method: 'GET', redirect: 'manual', signal: AbortSignal.timeout(10000),
+            headers: reqHeaders, dispatcher,
+          });
+          console.log(`[URL] Strat1b: status=${resp2.status}, location=${resp2.headers.get('location')?.slice(0, 120)}`);
+          const loc2 = resp2.headers.get('location');
+          if (loc2 && !loc2.includes('adzuna')) {
+            console.log(`[URL] Adzuna résolu via redirect chain: ${loc2.slice(0, 120)}`);
+            return loc2;
+          }
+        }
+      }
+      // Si status 200, parser le HTML
+      if (resp.status === 200) {
+        const html = await resp.text();
+        const titleMatch = html.match(/<title[^>]*>([^<]*)<\/title>/i);
+        const pageTitle = titleMatch ? titleMatch[1].trim() : 'inconnu';
+        console.log(`[URL-DBG] Strat1 HTML: titre="${pageTitle}", length=${html.length}`);
+        if (!pageTitle.toLowerCase().includes('refus') && !pageTitle.toLowerCase().includes('denied')) {
+          const resolved = extractEmployerUrl(html);
+          if (resolved) return resolved;
+        }
+      }
     } catch (e) {
-      console.warn(`[URL] undici ProxyAgent indispo: ${e.message} — fetch direct`);
-      console.log(`[URL] Résolution Adzuna via HTTP: ${url.slice(0, 100)}`);
+      console.warn(`[URL] Strat1 erreur: ${e.message}`);
     }
-  } else {
-    console.log(`[URL] Résolution Adzuna via HTTP: ${url.slice(0, 100)}`);
   }
 
+  // Stratégie 2 : redirect manual SANS proxy (IP Railway directe)
   try {
-    const resp = await fetchFn(url, fetchOpts);
-    // Cas 1 : HTTP redirect automatique vers domaine non-Adzuna
-    const finalUrl = resp.url;
-    if (!finalUrl.includes('adzuna')) {
-      console.log(`[URL] Adzuna résolu via redirect HTTP: ${finalUrl}`);
-      return finalUrl;
-    }
-    // Cas 2 : parser le HTML pour trouver l'URL de la plateforme employeur
-    const html = await resp.text();
-
-    // Debug: titre de la page et longueur HTML
-    const titleMatch = html.match(/<title[^>]*>([^<]*)<\/title>/i);
-    const pageTitle = titleMatch ? titleMatch[1].trim() : 'inconnu';
-    console.log(`[URL-DBG] Titre Adzuna: "${pageTitle}", HTML length: ${html.length}`);
-    if (pageTitle.toLowerCase().includes('refus') || pageTitle.toLowerCase().includes('denied')) {
-      console.log(`[URL] Adzuna — fetch HTTP bloqué ("${pageTitle}"), Playwright en fallback`);
-      return url;
-    }
-
-    // Cas 2a : chercher URLs plateformes connues dans tout le HTML (incl. scripts inline)
-    const knownPlatforms = [
-      'meteojob.com', 'hellowork.com', 'francetravail.fr', 'pole-emploi.fr',
-      'indeed.com', 'linkedin.com', 'welcometothejungle.com', 'apec.fr',
-      'cadremploi.fr', 'monster.fr', 'regionsjob.com', 'jobteaser.com',
-    ];
-    for (const platform of knownPlatforms) {
-      const esc = platform.replace('.', '\\.');
-      const match = html.match(new RegExp(`https?://(?:[\\w-]+\\.)*${esc}/[^"'\\s<>]+`, 'i'));
-      if (match) {
-        console.log(`[URL] Adzuna résolu via HTML (${platform}): ${match[0].slice(0, 120)}`);
-        return match[0];
+    console.log(`[URL] Strat2: redirect=manual IP directe pour ${url.slice(0, 80)}`);
+    const resp = await fetch(url, {
+      method: 'GET', redirect: 'manual', signal: AbortSignal.timeout(12000),
+      headers: reqHeaders,
+    });
+    console.log(`[URL] Strat2: status=${resp.status}, location=${resp.headers.get('location')?.slice(0, 120)}`);
+    if ([301, 302, 303, 307, 308].includes(resp.status)) {
+      const loc = resp.headers.get('location');
+      if (loc && !loc.includes('adzuna')) {
+        console.log(`[URL] Adzuna résolu via redirect direct: ${loc.slice(0, 120)}`);
+        return loc;
+      }
+      if (loc) {
+        const resp2 = await fetch(loc, {
+          method: 'GET', redirect: 'manual', signal: AbortSignal.timeout(10000),
+          headers: reqHeaders,
+        });
+        const loc2 = resp2.headers.get('location');
+        console.log(`[URL] Strat2b: status=${resp2.status}, location=${loc2?.slice(0, 120)}`);
+        if (loc2 && !loc2.includes('adzuna')) {
+          console.log(`[URL] Adzuna résolu via redirect chain direct: ${loc2.slice(0, 120)}`);
+          return loc2;
+        }
       }
     }
-
-    // Cas 2b : chercher URL employeur dans propriétés JSON / attributs data-*
-    const jsonUrlPatterns = [
-      /"(?:apply_url|externalUrl|employerUrl|apply_link|job_url|source_url)"\s*:\s*"(https?:\/\/[^"]+)"/i,
-      /data-(?:apply-url|href|url|redirect)="(https?:\/\/[^"]+)"/i,
-      /window\.location(?:\.href)?\s*=\s*["'](https?:\/\/[^"']+)["']/i,
-    ];
-    for (const pat of jsonUrlPatterns) {
-      const m = html.match(pat);
-      if (m && m[1] && !m[1].includes('adzuna')) {
-        console.log(`[URL] Adzuna résolu via JSON/data-attr: ${m[1].slice(0, 120)}`);
-        return m[1];
+    if (resp.status === 200) {
+      const html = await resp.text();
+      const titleMatch = html.match(/<title[^>]*>([^<]*)<\/title>/i);
+      const pageTitle = titleMatch ? titleMatch[1].trim() : 'inconnu';
+      console.log(`[URL-DBG] Strat2 HTML: titre="${pageTitle}", length=${html.length}`);
+      if (!pageTitle.toLowerCase().includes('refus') && !pageTitle.toLowerCase().includes('denied')) {
+        const resolved = extractEmployerUrl(html);
+        if (resolved) return resolved;
       }
     }
-
-    console.log(`[URL] Adzuna — résolution HTTP sans résultat, Playwright en fallback`);
   } catch (e) {
-    console.warn(`[URL] Adzuna pré-résolution erreur: ${e.message}`);
+    console.warn(`[URL] Strat2 erreur: ${e.message}`);
   }
+
+  console.log(`[URL] Adzuna — toutes stratégies échouées, Playwright en fallback`);
   return url;
+}
+
+function extractEmployerUrl(html) {
+  const knownPlatforms = [
+    'meteojob.com', 'hellowork.com', 'francetravail.fr', 'pole-emploi.fr',
+    'indeed.com', 'linkedin.com', 'welcometothejungle.com', 'apec.fr',
+    'cadremploi.fr', 'monster.fr', 'regionsjob.com', 'jobteaser.com',
+  ];
+  for (const platform of knownPlatforms) {
+    const esc = platform.replace('.', '\\.');
+    const match = html.match(new RegExp(`https?://(?:[\\w-]+\\.)*${esc}/[^"'\\s<>]+`, 'i'));
+    if (match) {
+      console.log(`[URL] Employeur trouvé via HTML (${platform}): ${match[0].slice(0, 120)}`);
+      return match[0];
+    }
+  }
+  const jsonUrlPatterns = [
+    /"(?:apply_url|externalUrl|employerUrl|apply_link|job_url|source_url)"\s*:\s*"(https?:\/\/[^"]+)"/i,
+    /data-(?:apply-url|href|url|redirect)="(https?:\/\/[^"]+)"/i,
+    /window\.location(?:\.href)?\s*=\s*["'](https?:\/\/[^"']+)["']/i,
+  ];
+  for (const pat of jsonUrlPatterns) {
+    const m = html.match(pat);
+    if (m && m[1] && !m[1].includes('adzuna')) {
+      console.log(`[URL] Employeur trouvé via JSON/data: ${m[1].slice(0, 120)}`);
+      return m[1];
+    }
+  }
+  return null;
 }
 
 // ─── Navigation avec suivi de redirections (HTTP + JS) ───────────────────────
