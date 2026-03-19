@@ -2,7 +2,7 @@
 const express = require('express');
 const { WebSocketServer } = require('ws');
 const http = require('http');
-const APP_VERSION = 'v3.3-adzuna-presolve';
+const APP_VERSION = 'v3.4-adzuna-proxy';
 
 const app = express();
 app.use(express.json());
@@ -309,6 +309,17 @@ async function preResolveAdzunaUrl(url) {
     }
     // Cas 2 : parser le HTML pour trouver l'URL de la plateforme employeur
     const html = await resp.text();
+
+    // Debug: titre de la page et longueur HTML
+    const titleMatch = html.match(/<title[^>]*>([^<]*)<\/title>/i);
+    const pageTitle = titleMatch ? titleMatch[1].trim() : 'inconnu';
+    console.log(`[URL-DBG] Titre Adzuna: "${pageTitle}", HTML length: ${html.length}`);
+    if (pageTitle.toLowerCase().includes('refus') || pageTitle.toLowerCase().includes('denied')) {
+      console.log(`[URL] Adzuna — fetch HTTP bloqué ("${pageTitle}"), Playwright en fallback`);
+      return url;
+    }
+
+    // Cas 2a : chercher URLs plateformes connues dans tout le HTML (incl. scripts inline)
     const knownPlatforms = [
       'meteojob.com', 'hellowork.com', 'francetravail.fr', 'pole-emploi.fr',
       'indeed.com', 'linkedin.com', 'welcometothejungle.com', 'apec.fr',
@@ -322,6 +333,21 @@ async function preResolveAdzunaUrl(url) {
         return match[0];
       }
     }
+
+    // Cas 2b : chercher URL employeur dans propriétés JSON / attributs data-*
+    const jsonUrlPatterns = [
+      /"(?:apply_url|externalUrl|employerUrl|apply_link|job_url|source_url)"\s*:\s*"(https?:\/\/[^"]+)"/i,
+      /data-(?:apply-url|href|url|redirect)="(https?:\/\/[^"]+)"/i,
+      /window\.location(?:\.href)?\s*=\s*["'](https?:\/\/[^"']+)["']/i,
+    ];
+    for (const pat of jsonUrlPatterns) {
+      const m = html.match(pat);
+      if (m && m[1] && !m[1].includes('adzuna')) {
+        console.log(`[URL] Adzuna résolu via JSON/data-attr: ${m[1].slice(0, 120)}`);
+        return m[1];
+      }
+    }
+
     console.log(`[URL] Adzuna — résolution HTTP sans résultat, Playwright en fallback`);
   } catch (e) {
     console.warn(`[URL] Adzuna pré-résolution erreur: ${e.message}`);
@@ -768,17 +794,13 @@ app.post('/sessions', requireAuth, async (req, res) => {
     };
 
     if (proxyAddress && proxyPort) {
-      // Pour Adzuna : ne pas utiliser le proxy (leur bot detection bloque les IPs de proxy datacenter)
-      if (initialPlatform !== 'adzuna') {
-        launchOptions.proxy = {
-          server: `http://${proxyAddress}:${proxyPort}`,
-          username: proxyLogin,
-          password: proxyPassword,
-        };
-        console.log(`[PROXY] Mode proxy activé: ${proxyAddress}:${proxyPort}`);
-      } else {
-        console.log(`[PROXY] Proxy désactivé pour adzuna (détection bot sur IPs proxy)`);
-      }
+      // Utiliser le proxy résidentiel pour tous les sites (incl. Adzuna)
+      launchOptions.proxy = {
+        server: `http://${proxyAddress}:${proxyPort}`,
+        username: proxyLogin,
+        password: proxyPassword,
+      };
+      console.log(`[PROXY] Mode proxy activé: ${proxyAddress}:${proxyPort}`);
     } else {
       console.log('[PROXY] Aucun proxy configuré');
     }
