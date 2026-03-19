@@ -301,6 +301,89 @@ async function navigateWithRedirects(page, url) {
   return finalUrl;
 }
 
+// ─── Stratégie Adzuna : suivre le lien vers la plateforme cible ─────────────────
+async function applyAdzuna(page) {
+  console.log('[APPLY] Adzuna — URL:', page.url());
+
+  // Logger le titre et les liens visibles pour debug
+  try {
+    const title = await page.title();
+    const allLinks = await page.$$eval('a[href]', els =>
+      els.slice(0, 15).map(e => ({ text: e.textContent?.trim().slice(0, 50), href: e.href?.slice(0, 100) }))
+    );
+    console.log(`[APPLY] Adzuna — titre: "${title}", liens: ${JSON.stringify(allLinks)}`);
+  } catch {}
+
+  // 1. Fermer le modal d'alerte email s'il existe
+  const modalDismissSelectors = [
+    'a:has-text("Non merci, je veux voir l\'offre d\'emploi")',
+    'a:has-text("Non merci")',
+    'button:has-text("Non merci")',
+    '[data-ui="skip-alert-signup"]',
+    '.skip-link',
+    '.modal__close',
+    '[class*="skip"]',
+  ];
+  for (const sel of modalDismissSelectors) {
+    try {
+      const btn = await page.$(sel);
+      if (btn && await btn.isVisible().catch(() => false)) {
+        console.log(`[APPLY] Adzuna — fermeture modal: ${sel}`);
+        await btn.click();
+        await page.waitForTimeout(1500);
+        break;
+      }
+    } catch {}
+  }
+
+  // 2. Cliquer sur le lien vers la plateforme cible (MeteoJob, etc.)
+  const applySelectors = [
+    'a:has-text("Voir l\'annonce")',
+    'a:has-text("Voir l\'offre")',
+    'a:has-text("Voir l\'offre d\'emploi")',
+    'a:has-text("Postuler maintenant")',
+    'a:has-text("Postuler")',
+    '.btn-apply',
+    '.ad_details__apply a',
+    '[class*="apply"] a',
+    '[class*="apply-btn"]',
+    'a[data-ui="apply-button"]',
+    'a[href*="meteojob"]',
+    'a[href*="hellowork"]',
+    'a[href*="indeed"]',
+    'a[href*="francetravail"]',
+    'a[href*="linkedin"]',
+  ];
+
+  for (const sel of applySelectors) {
+    try {
+      const btn = await page.$(sel);
+      if (btn && await btn.isVisible().catch(() => false)) {
+        const href = await btn.getAttribute('href').catch(() => null);
+        console.log(`[APPLY] Adzuna — bouton trouvé: ${sel} (href: ${href?.slice(0, 80)})`);
+        // Si le lien ouvre dans un nouvel onglet, forcer la navigation dans la page courante
+        await btn.evaluate(el => { el.removeAttribute('target'); });
+        await btn.click();
+        // Attendre la navigation vers la plateforme cible
+        try {
+          await page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 15000 });
+        } catch {
+          await page.waitForTimeout(3000);
+        }
+        const newUrl = page.url();
+        const newPlatform = detectPlatform(newUrl);
+        console.log(`[APPLY] Adzuna — redirigé vers: ${newUrl} (${newPlatform})`);
+        if (newPlatform !== 'adzuna') {
+          return applyByPlatform(page, newPlatform);
+        }
+        break;
+      }
+    } catch {}
+  }
+
+  return { success: false, platform: 'adzuna', error: 'Lien vers la plateforme cible non trouvé sur Adzuna' };
+}
+
 // ─── Dispatch apply selon plateforme finale ───────────────────────────────────
 async function applyByPlatform(page, platform) {
   switch (platform) {
@@ -308,6 +391,7 @@ async function applyByPlatform(page, platform) {
     case 'meteojob':      return applyMeteoJob(page);
     case 'hellowork':     return applyHelloWork(page);
     case 'francetravail': return applyFranceTravail(page);
+    case 'adzuna':        return applyAdzuna(page);
     default:              return applyGeneric(page);
   }
 }
