@@ -3,7 +3,7 @@ FROM node:20-bookworm-slim
 WORKDIR /app
 
 COPY package*.json ./
-RUN npm ci && npx playwright install chromium --with-deps
+RUN npm ci && npx playwright install chromium firefox --with-deps
 
 COPY server.js .
 
