@@ -2,7 +2,7 @@
 const express = require('express');
 const { WebSocketServer } = require('ws');
 const http = require('http');
-const APP_VERSION = 'v2-store-cookies-pg';
+const APP_VERSION = 'v3-multi-platform';
 
 const app = express();
 app.use(express.json());
@@ -24,6 +24,219 @@ function requireAuth(req, res, next) {
   const secret = process.env.AUTOMATION_SECRET;
   if (!secret || req.headers['x-automation-secret'] !== secret) return res.status(401).json({ error: 'Non autorise' });
   next();
+}
+
+// ─── Détection de plateforme ─────────────────────────────────────────────────
+function detectPlatform(jobUrl) {
+  if (!jobUrl) return 'unknown';
+  const url = jobUrl.toLowerCase();
+  if (url.includes('indeed.com') || url.includes('smartapply.indeed')) return 'indeed';
+  if (url.includes('meteojob.com')) return 'meteojob';
+  if (url.includes('hellowork.com')) return 'hellowork';
+  if (url.includes('francetravail.fr') || url.includes('pole-emploi.fr')) return 'francetravail';
+  if (url.includes('linkedin.com')) return 'linkedin';
+  if (url.includes('welcometothejungle.com')) return 'wttj';
+  return 'generic';
+}
+
+function cookieDomainForPlatform(platform) {
+  const map = {
+    indeed: 'indeed.com', meteojob: 'meteojob.com', hellowork: 'hellowork.com',
+    francetravail: 'francetravail.fr', linkedin: 'linkedin.com', wttj: 'welcometothejungle.com',
+  };
+  return map[platform] || null;
+}
+
+// ─── Init DB : table multi-plateforme ────────────────────────────────────────
+async function initDb() {
+  if (!dbPool) return;
+  try {
+    await dbPool.query(`
+      CREATE TABLE IF NOT EXISTS user_platform_cookies (
+        user_id    TEXT NOT NULL,
+        domain     TEXT NOT NULL,
+        cookies    JSONB NOT NULL,
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        PRIMARY KEY (user_id, domain)
+      )
+    `);
+    console.log('[DB] user_platform_cookies table OK');
+  } catch (e) {
+    console.error('[DB] initDb error:', e.message);
+  }
+}
+initDb();
+
+// ─── Chargement cookies multi-plateforme ─────────────────────────────────────
+async function loadCookiesFromDb(userId, platform) {
+  if (!dbPool || !userId) return null;
+  const domain = cookieDomainForPlatform(platform);
+  if (domain) {
+    try {
+      const r = await dbPool.query(
+        'SELECT cookies FROM user_platform_cookies WHERE user_id = $1 AND domain = $2',
+        [userId, domain]
+      );
+      if (r.rows.length) {
+        const c = r.rows[0].cookies;
+        const cookies = Array.isArray(c) ? c : JSON.parse(c);
+        console.log(`[DB] ${cookies.length} cookies chargés (user_platform_cookies) pour ${domain}`);
+        return cookies;
+      }
+    } catch (e) { console.warn('[DB] loadCookies upc error:', e.message); }
+  }
+  // Fallback : table indeed_cookies pour Indeed
+  if (platform === 'indeed') {
+    try {
+      const r = await dbPool.query('SELECT cookies FROM indeed_cookies WHERE user_id = $1', [userId]);
+      if (r.rows.length) {
+        const c = r.rows[0].cookies;
+        const cookies = Array.isArray(c) ? c : JSON.parse(c);
+        console.log(`[DB] ${cookies.length} cookies chargés (indeed_cookies fallback)`);
+        return cookies;
+      }
+    } catch (e) { console.warn('[DB] loadCookies fallback error:', e.message); }
+  }
+  return null;
+}
+
+// ─── Stratégies de candidature par plateforme ────────────────────────────────
+async function applyIndeed(page) {
+  console.log('[APPLY] Indeed — URL:', page.url());
+  const currentUrl = page.url();
+  if (currentUrl.includes('/auth') || currentUrl.includes('login')) {
+    return { success: false, platform: 'indeed', error: 'Redirigé vers login — cookies invalides ou expirés' };
+  }
+  const selectors = [
+    '[data-testid="indeedApplyButton"]',
+    '.jobsearch-IndeedApplyButton',
+    'button[id*="apply"]',
+    'button:has-text("Postuler")',
+    'a:has-text("Postuler maintenant")',
+    'button:has-text("Apply now")',
+  ];
+  for (const sel of selectors) {
+    try {
+      const btn = await page.$(sel);
+      if (btn) {
+        console.log(`[APPLY] Indeed — bouton trouvé: ${sel}`);
+        await btn.click();
+        await page.waitForTimeout(2000);
+        return { success: true, platform: 'indeed', selector: sel, resultUrl: page.url() };
+      }
+    } catch {}
+  }
+  return { success: false, platform: 'indeed', error: 'Bouton postuler non trouvé' };
+}
+
+async function applyMeteoJob(page) {
+  console.log('[APPLY] MeteoJob — URL:', page.url());
+  const selectors = [
+    'a[href*="postuler"]',
+    'button:has-text("Postuler")',
+    'a:has-text("Postuler")',
+    'a:has-text("Je postule")',
+    'button:has-text("Je postule")',
+    '.apply-button',
+    '[data-testid="apply-button"]',
+    'button[class*="apply"]',
+    'a[class*="apply"]',
+  ];
+  for (const sel of selectors) {
+    try {
+      const btn = await page.$(sel);
+      if (btn) {
+        console.log(`[APPLY] MeteoJob — bouton trouvé: ${sel}`);
+        await btn.click();
+        await page.waitForTimeout(2000);
+        return { success: true, platform: 'meteojob', selector: sel, resultUrl: page.url() };
+      }
+    } catch {}
+  }
+  try {
+    const btn = page.getByRole('link', { name: /postuler/i }).first();
+    if (await btn.count() > 0) {
+      console.log('[APPLY] MeteoJob — bouton via getByRole');
+      await btn.click();
+      await page.waitForTimeout(2000);
+      return { success: true, platform: 'meteojob', selector: 'role:link:postuler', resultUrl: page.url() };
+    }
+  } catch {}
+  return { success: false, platform: 'meteojob', error: 'Bouton postuler non trouvé' };
+}
+
+async function applyHelloWork(page) {
+  console.log('[APPLY] HelloWork — URL:', page.url());
+  const selectors = [
+    'a:has-text("Postuler")',
+    'button:has-text("Postuler")',
+    '[data-cy="apply-btn"]',
+    '.btn-apply',
+    'a[href*="postuler"]',
+  ];
+  for (const sel of selectors) {
+    try {
+      const btn = await page.$(sel);
+      if (btn) {
+        console.log(`[APPLY] HelloWork — bouton trouvé: ${sel}`);
+        await btn.click();
+        await page.waitForTimeout(2000);
+        return { success: true, platform: 'hellowork', selector: sel, resultUrl: page.url() };
+      }
+    } catch {}
+  }
+  return { success: false, platform: 'hellowork', error: 'Bouton postuler non trouvé' };
+}
+
+async function applyFranceTravail(page) {
+  console.log('[APPLY] FranceTravail — URL:', page.url());
+  const selectors = [
+    'button:has-text("Je postule")',
+    'a:has-text("Je postule")',
+    '[data-testid="postuler-btn"]',
+    'button:has-text("Postuler")',
+    'a:has-text("Postuler")',
+  ];
+  for (const sel of selectors) {
+    try {
+      const btn = await page.$(sel);
+      if (btn) {
+        console.log(`[APPLY] FranceTravail — bouton trouvé: ${sel}`);
+        await btn.click();
+        await page.waitForTimeout(2000);
+        return { success: true, platform: 'francetravail', selector: sel, resultUrl: page.url() };
+      }
+    } catch {}
+  }
+  return { success: false, platform: 'francetravail', error: 'Bouton postuler non trouvé' };
+}
+
+async function applyGeneric(page) {
+  console.log('[APPLY] Generic — URL:', page.url());
+  const selectors = [
+    'button:has-text("Postuler")',
+    'a:has-text("Postuler")',
+    'button:has-text("Je postule")',
+    'a:has-text("Je postule")',
+    'button:has-text("Apply")',
+    'a:has-text("Apply")',
+    'button:has-text("Apply now")',
+    '[class*="apply-btn"]',
+    '[id*="apply-btn"]',
+    '[class*="postuler"]',
+  ];
+  for (const sel of selectors) {
+    try {
+      const btn = await page.$(sel);
+      if (btn) {
+        console.log(`[APPLY] Generic — bouton trouvé: ${sel}`);
+        await btn.click();
+        await page.waitForTimeout(2000);
+        return { success: true, platform: 'generic', selector: sel, resultUrl: page.url() };
+      }
+    } catch {}
+  }
+  return { success: false, platform: 'generic', error: 'Aucun bouton postuler trouvé' };
 }
 
 app.get('/health', (_req, res) => res.json({ ok: true, sessions: sessions.size, version: APP_VERSION }));
@@ -307,22 +520,18 @@ app.post('/sessions', requireAuth, async (req, res) => {
   if (!sessionId || !initialUrl) return res.status(400).json({ error: 'sessionId et initialUrl requis' });
   if (sessions.has(sessionId)) return res.status(409).json({ error: 'Session deja existante' });
 
-  // Problème 5 : vérifier que des cookies Indeed sont disponibles pour cet utilisateur
+  // Détection de plateforme et chargement des cookies correspondants
+  const platform = detectPlatform(initialUrl);
+  console.log(`[SESSION] Plateforme détectée: ${platform} pour ${initialUrl}`);
+
   let storedCookies = null;
-  if (userId && dbPool) {
-    try {
-      const row = await dbPool.query('SELECT cookies FROM indeed_cookies WHERE user_id = $1', [userId]);
-      if (row.rows.length && row.rows[0].cookies) {
-        storedCookies = Array.isArray(row.rows[0].cookies)
-          ? row.rows[0].cookies
-          : JSON.parse(row.rows[0].cookies);
-      }
-    } catch (e) {
-      console.warn('[SESSION] Erreur lecture cookies DB:', e.message);
-    }
+  if (userId) {
+    storedCookies = await loadCookiesFromDb(userId, platform);
   }
-  if (!storedCookies || !storedCookies.length) {
-    return res.status(400).json({ error: 'Cookies Indeed non disponibles. Utilisez l\'extension pour les envoyer d\'abord.' });
+
+  // Cookies obligatoires uniquement pour Indeed (authentification requise)
+  if (platform === 'indeed' && (!storedCookies || !storedCookies.length)) {
+    return res.status(400).json({ error: 'Cookies Indeed non disponibles. Utilisez l\'extension pour les envoyer d\'abord.', platform });
   }
 
   try {
@@ -396,16 +605,39 @@ app.post('/sessions', requireAuth, async (req, res) => {
         navigator.permissions.query = (params) => params.name === 'notifications' ? Promise.resolve({ state: 'default', onchange: null }) : orig(params);
       }
     });
-    // Problème 2 : injecter les cookies AVANT toute navigation
-    await context.addCookies(storedCookies);
-    console.log(`[SESSION] Cookies injectés: ${storedCookies.length}`);
+    // Injecter les cookies AVANT toute navigation (si disponibles)
+    if (storedCookies && storedCookies.length) {
+      await context.addCookies(storedCookies);
+      console.log(`[SESSION] Cookies injectés: ${storedCookies.length} (platform: ${platform})`);
+    } else {
+      console.log(`[SESSION] Aucun cookie — navigation sans authentification (platform: ${platform})`);
+    }
     const page = await context.newPage();
     await page.goto(initialUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
-    const sessionObj = { browser, context, page, createdAt: Date.now() };
+    const sessionObj = { browser, context, page, createdAt: Date.now(), platform };
     sessions.set(sessionId, sessionObj);
     // Auto-solve Turnstile si 2captcha configuré
     console.log('[captcha] Trigger autoSolveTurnstile on initial page:', page.url());
     autoSolveTurnstile(page).then(solved => { if (solved) console.log('[captcha] Auto-solved on load'); }).catch(() => {});
+    // Auto-candidature selon la plateforme (async, non-bloquant)
+    (async () => {
+      try {
+        await page.waitForTimeout(3000);
+        let applyResult;
+        switch (platform) {
+          case 'indeed':       applyResult = await applyIndeed(page); break;
+          case 'meteojob':     applyResult = await applyMeteoJob(page); break;
+          case 'hellowork':    applyResult = await applyHelloWork(page); break;
+          case 'francetravail': applyResult = await applyFranceTravail(page); break;
+          default:             applyResult = await applyGeneric(page); break;
+        }
+        sessionObj.applyResult = applyResult;
+        console.log(`[SESSION] Résultat candidature (${platform}):`, JSON.stringify(applyResult));
+      } catch (applyErr) {
+        console.error(`[SESSION] Apply error (${platform}):`, applyErr.message);
+        sessionObj.applyResult = { success: false, platform, error: applyErr.message };
+      }
+    })();
     // Suivre les popups (Google OAuth, etc.)
     context.on('page', async (newPage) => {
       try {
@@ -436,22 +668,33 @@ app.options('/store-cookies', (req, res) => {
   res.sendStatus(204);
 });
 
-// Réception des cookies Indeed depuis l'extension Firefox
+// Réception des cookies depuis l'extension Firefox (multi-plateforme)
 app.post('/store-cookies', requireAuth, async (req, res) => {
   res.set('Access-Control-Allow-Origin', '*');
-  const { userId, cookies } = req.body;
+  const { userId, cookies, domain } = req.body;
   if (!userId || !Array.isArray(cookies) || !cookies.length) {
     return res.status(400).json({ error: 'userId et cookies requis' });
   }
+  const cookieDomain = domain || 'indeed.com';
   if (dbPool) {
     try {
+      // Stockage dans la table multi-plateforme
       await dbPool.query(
-        `INSERT INTO indeed_cookies (user_id, cookies, updated_at)
-         VALUES ($1, $2, NOW())
-         ON CONFLICT (user_id) DO UPDATE SET cookies = $2, updated_at = NOW()`,
-        [userId, JSON.stringify(cookies)]
+        `INSERT INTO user_platform_cookies (user_id, domain, cookies, updated_at)
+         VALUES ($1, $2, $3, NOW())
+         ON CONFLICT (user_id, domain) DO UPDATE SET cookies = $3, updated_at = NOW()`,
+        [userId, cookieDomain, JSON.stringify(cookies)]
       );
-      console.log(`[cookies] Stockés en DB pour userId: ${userId} (${cookies.length} cookies)`);
+      // Rétrocompatibilité : indeed_cookies pour indeed.com
+      if (cookieDomain === 'indeed.com') {
+        await dbPool.query(
+          `INSERT INTO indeed_cookies (user_id, cookies, updated_at)
+           VALUES ($1, $2, NOW())
+           ON CONFLICT (user_id) DO UPDATE SET cookies = $2, updated_at = NOW()`,
+          [userId, JSON.stringify(cookies)]
+        );
+      }
+      console.log(`[cookies] Stockés: userId=${userId}, domain=${cookieDomain} (${cookies.length} cookies)`);
     } catch (dbErr) {
       console.error('[cookies] DB error:', dbErr.message);
       return res.status(500).json({ error: 'Erreur DB: ' + dbErr.message });
@@ -459,7 +702,7 @@ app.post('/store-cookies', requireAuth, async (req, res) => {
   } else {
     console.warn('[cookies] dbPool non disponible — cookies non persistés');
   }
-  return res.json({ success: true });
+  return res.json({ success: true, domain: cookieDomain });
 });
 
 app.post('/sessions/:id/cookies', requireAuth, async (req, res) => {
