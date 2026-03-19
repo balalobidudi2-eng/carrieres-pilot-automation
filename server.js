@@ -2,7 +2,7 @@
 const express = require('express');
 const { WebSocketServer } = require('ws');
 const http = require('http');
-const APP_VERSION = 'v3.2-adzuna-redirect';
+const APP_VERSION = 'v3.3-adzuna-presolve';
 
 const app = express();
 app.use(express.json());
@@ -283,6 +283,50 @@ async function applyGeneric(page) {
     } catch {}
   }
   return { success: false, platform: 'generic', error: 'Aucun bouton postuler trouvé' };
+}
+
+// ─── Pré-résolution URL Adzuna via HTTP simple (bypass bot detection Playwright) ──
+async function preResolveAdzunaUrl(url) {
+  if (!url.includes('adzuna.fr') && !url.includes('adzuna.com')) return url;
+  console.log(`[URL] Résolution Adzuna via HTTP: ${url.slice(0, 100)}`);
+  try {
+    const resp = await fetch(url, {
+      method: 'GET',
+      redirect: 'follow',
+      signal: AbortSignal.timeout(12000),
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+        'Accept-Language': 'fr-FR,fr;q=0.9,en-US;q=0.8',
+        'Cache-Control': 'no-cache',
+      },
+    });
+    // Cas 1 : HTTP redirect automatique vers domaine non-Adzuna
+    const finalUrl = resp.url;
+    if (!finalUrl.includes('adzuna')) {
+      console.log(`[URL] Adzuna résolu via redirect HTTP: ${finalUrl}`);
+      return finalUrl;
+    }
+    // Cas 2 : parser le HTML pour trouver l'URL de la plateforme employeur
+    const html = await resp.text();
+    const knownPlatforms = [
+      'meteojob.com', 'hellowork.com', 'francetravail.fr', 'pole-emploi.fr',
+      'indeed.com', 'linkedin.com', 'welcometothejungle.com', 'apec.fr',
+      'cadremploi.fr', 'monster.fr', 'regionsjob.com', 'jobteaser.com',
+    ];
+    for (const platform of knownPlatforms) {
+      const esc = platform.replace('.', '\\.');
+      const match = html.match(new RegExp(`https?://(?:[\\w-]+\\.)*${esc}/[^"'\\s<>]+`, 'i'));
+      if (match) {
+        console.log(`[URL] Adzuna résolu via HTML (${platform}): ${match[0].slice(0, 120)}`);
+        return match[0];
+      }
+    }
+    console.log(`[URL] Adzuna — résolution HTTP sans résultat, Playwright en fallback`);
+  } catch (e) {
+    console.warn(`[URL] Adzuna pré-résolution erreur: ${e.message}`);
+  }
+  return url;
 }
 
 // ─── Navigation avec suivi de redirections (HTTP + JS) ───────────────────────
@@ -685,9 +729,15 @@ app.post('/sessions', requireAuth, async (req, res) => {
   if (!sessionId || !initialUrl) return res.status(400).json({ error: 'sessionId et initialUrl requis' });
   if (sessions.has(sessionId)) return res.status(409).json({ error: 'Session deja existante' });
 
-  // Détection initiale de plateforme (sera affinée après navigation/redirections)
-  const initialPlatform = detectPlatform(initialUrl);
-  console.log(`[SESSION] Plateforme initiale: ${initialPlatform} pour ${initialUrl}`);
+  // Détection initiale de plateforme + pré-résolution URL Adzuna via HTTP
+  let detectedPlatform = detectPlatform(initialUrl);
+  let effectiveUrl = initialUrl;
+  if (detectedPlatform === 'adzuna') {
+    effectiveUrl = await preResolveAdzunaUrl(initialUrl);
+    detectedPlatform = detectPlatform(effectiveUrl);
+  }
+  const initialPlatform = detectedPlatform;
+  console.log(`[SESSION] Plateforme initiale: ${initialPlatform} pour ${effectiveUrl}`);
 
   let storedCookies = null;
   if (userId && initialPlatform !== 'adzuna') {
@@ -784,7 +834,7 @@ app.post('/sessions', requireAuth, async (req, res) => {
     }
     const page = await context.newPage();
     // Naviguer en suivant toutes les redirections (HTTP + JS)
-    const finalUrl = await navigateWithRedirects(page, initialUrl);
+    const finalUrl = await navigateWithRedirects(page, effectiveUrl);
     const platform = detectPlatform(finalUrl);
     console.log(`[SESSION] Plateforme finale détectée: ${platform}`);
 
