@@ -131,36 +131,79 @@ async function applyIndeed(page) {
 
 async function applyMeteoJob(page) {
   console.log('[APPLY] MeteoJob — URL:', page.url());
+
+  // Fermer le modal de consentement cookies (TarteAuCitron) s'il est présent
+  try {
+    const consentSelectors = [
+      '#tarteaucitronAllAllowed2',
+      '#tarteaucitronAllAllowed',
+      '#tarteaucitronPersonalize2',
+      'button:has-text("Tout accepter")',
+      'button:has-text("J\'accepte tout")',
+      'button:has-text("Tout autoriser")',
+      '#tarteaucitronClosePanel',
+    ];
+    for (const sel of consentSelectors) {
+      try {
+        const btn = await page.$(sel);
+        if (btn) {
+          const visible = await btn.isVisible();
+          if (visible) {
+            console.log(`[APPLY] MeteoJob — fermeture modal cookies: ${sel}`);
+            await btn.click();
+            await page.waitForTimeout(1500);
+            break;
+          }
+        }
+      } catch {}
+    }
+  } catch {}
+
   const selectors = [
     'a[href*="postuler"]',
+    'a[href*="apply"]',
     'button:has-text("Postuler")',
     'a:has-text("Postuler")',
     'a:has-text("Je postule")',
     'button:has-text("Je postule")',
+    'a:has-text("POSTULER")',
     '.apply-button',
     '[data-testid="apply-button"]',
+    '[data-testid="apply-btn"]',
     'button[class*="apply"]',
     'a[class*="apply"]',
+    'a[class*="postuler"]',
+    'button[class*="postuler"]',
   ];
   for (const sel of selectors) {
     try {
       const btn = await page.$(sel);
       if (btn) {
-        console.log(`[APPLY] MeteoJob — bouton trouvé: ${sel}`);
-        await btn.click();
-        await page.waitForTimeout(2000);
-        return { success: true, platform: 'meteojob', selector: sel, resultUrl: page.url() };
+        const visible = await btn.isVisible().catch(() => false);
+        if (visible) {
+          console.log(`[APPLY] MeteoJob — bouton trouvé: ${sel}`);
+          await btn.click();
+          await page.waitForTimeout(2000);
+          return { success: true, platform: 'meteojob', selector: sel, resultUrl: page.url() };
+        }
       }
     } catch {}
   }
   try {
-    const btn = page.getByRole('link', { name: /postuler/i }).first();
+    const btn = page.getByRole('link', { name: /postuler|je postule/i }).first();
     if (await btn.count() > 0) {
       console.log('[APPLY] MeteoJob — bouton via getByRole');
       await btn.click();
       await page.waitForTimeout(2000);
       return { success: true, platform: 'meteojob', selector: 'role:link:postuler', resultUrl: page.url() };
     }
+  } catch {}
+
+  // Log page title and visible links for debugging
+  try {
+    const title = await page.title();
+    const links = await page.$$eval('a[href]', els => els.slice(0, 10).map(e => ({ text: e.textContent?.trim().slice(0, 40), href: e.href?.slice(0, 60) })));
+    console.log(`[APPLY] MeteoJob — titre: "${title}", liens: ${JSON.stringify(links)}`);
   } catch {}
   return { success: false, platform: 'meteojob', error: 'Bouton postuler non trouvé' };
 }
