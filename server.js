@@ -2,7 +2,7 @@
 const express = require('express');
 const { WebSocketServer } = require('ws');
 const http = require('http');
-const APP_VERSION = 'v3.5-adzuna-undici';
+const APP_VERSION = 'v3.6-adzuna-undici-fix';
 
 const app = express();
 app.use(express.json());
@@ -307,7 +307,7 @@ async function preResolveAdzunaUrl(url) {
   // Essayer via proxy résidentiel en premier (undici ProxyAgent)
   if (proxyAddress && proxyPort && proxyLogin && proxyPwd) {
     try {
-      const { fetch: undiciFetch, ProxyAgent } = require('node:undici');
+      const { fetch: undiciFetch, ProxyAgent } = require('undici');
       const dispatcher = new ProxyAgent(`http://${proxyLogin}:${proxyPwd}@${proxyAddress}:${proxyPort}`);
       fetchFn  = undiciFetch;
       fetchOpts = { ...fetchOpts, dispatcher };
