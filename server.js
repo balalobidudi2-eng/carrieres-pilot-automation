@@ -2,7 +2,7 @@
 const express = require('express');
 const { WebSocketServer } = require('ws');
 const http = require('http');
-const APP_VERSION = 'v3.1-meteojob-validated';
+const APP_VERSION = 'v3.2-adzuna-redirect';
 
 const app = express();
 app.use(express.json());
@@ -30,6 +30,7 @@ function requireAuth(req, res, next) {
 function detectPlatform(jobUrl) {
   if (!jobUrl) return 'unknown';
   const url = jobUrl.toLowerCase();
+  if (url.includes('adzuna.fr') || url.includes('adzuna.com')) return 'adzuna';
   if (url.includes('indeed.com') || url.includes('smartapply.indeed')) return 'indeed';
   if (url.includes('meteojob.com')) return 'meteojob';
   if (url.includes('hellowork.com')) return 'hellowork';
@@ -282,6 +283,33 @@ async function applyGeneric(page) {
     } catch {}
   }
   return { success: false, platform: 'generic', error: 'Aucun bouton postuler trouvé' };
+}
+
+// ─── Navigation avec suivi de redirections (HTTP + JS) ───────────────────────
+async function navigateWithRedirects(page, url) {
+  try {
+    await page.goto(url, { waitUntil: 'networkidle', timeout: 45000 });
+  } catch (e) {
+    // Timeout ou erreur réseau — continuer avec l'URL courante
+    console.warn(`[NAV] Navigation timeout/erreur, URL courante: ${page.url()} — ${e.message}`);
+  }
+  // Attendre redirections JS éventuelles (window.location, meta-refresh…)
+  await page.waitForTimeout(3000);
+  const finalUrl = page.url();
+  console.log(`[NAV] URL initiale: ${url}`);
+  console.log(`[NAV] URL finale après redirections: ${finalUrl}`);
+  return finalUrl;
+}
+
+// ─── Dispatch apply selon plateforme finale ───────────────────────────────────
+async function applyByPlatform(page, platform) {
+  switch (platform) {
+    case 'indeed':        return applyIndeed(page);
+    case 'meteojob':      return applyMeteoJob(page);
+    case 'hellowork':     return applyHelloWork(page);
+    case 'francetravail': return applyFranceTravail(page);
+    default:              return applyGeneric(page);
+  }
 }
 
 app.get('/health', (_req, res) => res.json({ ok: true, sessions: sessions.size, version: APP_VERSION }));
@@ -565,18 +593,18 @@ app.post('/sessions', requireAuth, async (req, res) => {
   if (!sessionId || !initialUrl) return res.status(400).json({ error: 'sessionId et initialUrl requis' });
   if (sessions.has(sessionId)) return res.status(409).json({ error: 'Session deja existante' });
 
-  // Détection de plateforme et chargement des cookies correspondants
-  const platform = detectPlatform(initialUrl);
-  console.log(`[SESSION] Plateforme détectée: ${platform} pour ${initialUrl}`);
+  // Détection initiale de plateforme (sera affinée après navigation/redirections)
+  const initialPlatform = detectPlatform(initialUrl);
+  console.log(`[SESSION] Plateforme initiale: ${initialPlatform} pour ${initialUrl}`);
 
   let storedCookies = null;
-  if (userId) {
-    storedCookies = await loadCookiesFromDb(userId, platform);
+  if (userId && initialPlatform !== 'adzuna') {
+    storedCookies = await loadCookiesFromDb(userId, initialPlatform);
   }
 
-  // Cookies obligatoires uniquement pour Indeed (authentification requise)
-  if (platform === 'indeed' && (!storedCookies || !storedCookies.length)) {
-    return res.status(400).json({ error: 'Cookies Indeed non disponibles. Utilisez l\'extension pour les envoyer d\'abord.', platform });
+  // Cookies obligatoires pour Indeed uniquement sur URL directe (pas via agrégateur)
+  if (initialPlatform === 'indeed' && (!storedCookies || !storedCookies.length)) {
+    return res.status(400).json({ error: 'Cookies Indeed non disponibles. Utilisez l\'extension pour les envoyer d\'abord.', platform: 'indeed' });
   }
 
   try {
@@ -653,29 +681,37 @@ app.post('/sessions', requireAuth, async (req, res) => {
     // Injecter les cookies AVANT toute navigation (si disponibles)
     if (storedCookies && storedCookies.length) {
       await context.addCookies(storedCookies);
-      console.log(`[SESSION] Cookies injectés: ${storedCookies.length} (platform: ${platform})`);
+      console.log(`[SESSION] Cookies pré-injectés: ${storedCookies.length} (platform: ${initialPlatform})`);
     } else {
-      console.log(`[SESSION] Aucun cookie — navigation sans authentification (platform: ${platform})`);
+      console.log(`[SESSION] Aucun cookie initial — navigation sans authentification (platform: ${initialPlatform})`);
     }
     const page = await context.newPage();
-    await page.goto(initialUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
+    // Naviguer en suivant toutes les redirections (HTTP + JS)
+    const finalUrl = await navigateWithRedirects(page, initialUrl);
+    const platform = detectPlatform(finalUrl);
+    console.log(`[SESSION] Plateforme finale détectée: ${platform}`);
+
+    // Si la plateforme finale diffère de l'initiale (ex: adzuna→meteojob),
+    // charger et injecter les cookies de la plateforme finale, puis recharger
+    if (platform !== initialPlatform && userId) {
+      const finalCookies = await loadCookiesFromDb(userId, platform);
+      if (finalCookies && finalCookies.length) {
+        await context.addCookies(finalCookies);
+        console.log(`[SESSION] Cookies injectés pour plateforme finale ${platform}: ${finalCookies.length}`);
+        await page.goto(finalUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
+      }
+    }
+
     const sessionObj = { browser, context, page, createdAt: Date.now(), platform };
     sessions.set(sessionId, sessionObj);
     // Auto-solve Turnstile si 2captcha configuré
     console.log('[captcha] Trigger autoSolveTurnstile on initial page:', page.url());
     autoSolveTurnstile(page).then(solved => { if (solved) console.log('[captcha] Auto-solved on load'); }).catch(() => {});
-    // Auto-candidature selon la plateforme (async, non-bloquant)
+    // Auto-candidature selon la plateforme finale (async, non-bloquant)
     (async () => {
       try {
         await page.waitForTimeout(3000);
-        let applyResult;
-        switch (platform) {
-          case 'indeed':       applyResult = await applyIndeed(page); break;
-          case 'meteojob':     applyResult = await applyMeteoJob(page); break;
-          case 'hellowork':    applyResult = await applyHelloWork(page); break;
-          case 'francetravail': applyResult = await applyFranceTravail(page); break;
-          default:             applyResult = await applyGeneric(page); break;
-        }
+        const applyResult = await applyByPlatform(page, platform);
         sessionObj.applyResult = applyResult;
         console.log(`[SESSION] Résultat candidature (${platform}):`, JSON.stringify(applyResult));
       } catch (applyErr) {
